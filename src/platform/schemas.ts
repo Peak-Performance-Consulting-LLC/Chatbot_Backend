@@ -1,12 +1,15 @@
 import { z } from "zod";
 
-const urlSchema = z
-  .string()
-  .trim()
-  .url()
-  .max(1000);
+const urlSchema = z.string().trim().url().max(1000);
+const optionalUrlSchema = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  urlSchema.optional()
+);
+const colorSchema = z.string().trim().regex(/^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})$/, "Use a valid hex color");
 
 export const supportedServiceSchema = z.enum(["flights", "hotels", "cars", "cruises"]);
+export const widgetPositionSchema = z.enum(["left", "right"]);
+export const launcherStyleSchema = z.enum(["rounded", "pill", "square", "minimal"]);
 
 export const platformSignupSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -50,7 +53,19 @@ export const platformTenantProfileSchema = z.object({
   support_phone: z.string().trim().min(7).max(40).optional(),
   support_email: z.string().trim().email().max(160).optional(),
   support_cta_label: z.string().trim().min(3).max(80).optional(),
-  business_description: z.string().trim().max(1000).optional()
+  business_description: z.string().trim().max(1000).optional(),
+  primary_color: colorSchema.optional(),
+  user_bubble_color: colorSchema.optional(),
+  bot_bubble_color: colorSchema.optional(),
+  font_family: z.string().trim().min(2).max(80).optional(),
+  widget_position: widgetPositionSchema.optional(),
+  launcher_style: launcherStyleSchema.optional(),
+  window_width: z.number().int().min(320).max(520).optional(),
+  window_height: z.number().int().min(520).max(860).optional(),
+  border_radius: z.number().int().min(8).max(36).optional(),
+  welcome_message: z.string().trim().min(8).max(320).optional(),
+  bot_name: z.string().trim().min(2).max(80).optional(),
+  bot_avatar_url: optionalUrlSchema
 });
 
 export const platformTenantDomainSchema = z.object({

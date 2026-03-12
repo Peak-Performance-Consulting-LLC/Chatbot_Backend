@@ -18,7 +18,35 @@ alter table public.tenants
   add column if not exists support_phone text,
   add column if not exists support_email text,
   add column if not exists support_cta_label text not null default 'Connect with a specialist',
-  add column if not exists business_description text;
+  add column if not exists business_description text,
+  add column if not exists knowledge_status text not null default 'pending',
+  add column if not exists knowledge_message text,
+  add column if not exists knowledge_last_ingested_at timestamptz,
+  add column if not exists primary_color text not null default '#006d77',
+  add column if not exists user_bubble_color text not null default '#006d77',
+  add column if not exists bot_bubble_color text not null default '#edf6f9',
+  add column if not exists font_family text not null default 'Manrope',
+  add column if not exists widget_position text not null default 'right',
+  add column if not exists launcher_style text not null default 'rounded',
+  add column if not exists window_width integer not null default 380,
+  add column if not exists window_height integer not null default 640,
+  add column if not exists border_radius integer not null default 18,
+  add column if not exists welcome_message text,
+  add column if not exists bot_name text not null default 'AeroConcierge',
+  add column if not exists bot_avatar_url text;
+
+alter table public.tenants
+  drop constraint if exists tenants_knowledge_status_check,
+  drop constraint if exists tenants_widget_position_check,
+  drop constraint if exists tenants_launcher_style_check;
+
+alter table public.tenants
+  add constraint tenants_knowledge_status_check
+    check (knowledge_status in ('pending', 'processing', 'ready', 'warning', 'error')),
+  add constraint tenants_widget_position_check
+    check (widget_position in ('left', 'right')),
+  add constraint tenants_launcher_style_check
+    check (launcher_style in ('rounded', 'pill', 'square', 'minimal'));
 
 -- 3) Knowledge chunks (tenant-scoped embeddings)
 create table if not exists public.knowledge_chunks (
@@ -214,10 +242,20 @@ create table if not exists public.tenant_domain_verifications (
   domain text not null unique,
   txt_name text not null,
   txt_value text not null,
-  status text not null default 'pending' check (status in ('pending', 'verified')),
+  status text not null default 'pending',
+  last_checked_at timestamptz,
+  last_error text,
+  last_seen_records text[] not null default array[]::text[],
   verified_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.tenant_domain_verifications
+  drop constraint if exists tenant_domain_verifications_status_check;
+
+alter table public.tenant_domain_verifications
+  add constraint tenant_domain_verifications_status_check
+    check (status in ('pending', 'txt_not_found', 'txt_mismatch', 'verified'));
 
 create index if not exists tenant_domain_status_idx
   on public.tenant_domain_verifications(status, created_at desc);

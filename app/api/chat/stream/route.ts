@@ -46,6 +46,7 @@ import type { TravelService, TravelServiceState } from "@/travel/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 function isFlightStateActive(state: FlightSearchState | null) {
   return Boolean(state && state.status !== "done" && state.status !== "completed");

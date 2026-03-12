@@ -36,7 +36,19 @@ export async function PATCH(request: Request) {
       support_phone: parsed.data.support_phone,
       support_email: parsed.data.support_email,
       support_cta_label: parsed.data.support_cta_label,
-      business_description: parsed.data.business_description
+      business_description: parsed.data.business_description,
+      primary_color: parsed.data.primary_color,
+      user_bubble_color: parsed.data.user_bubble_color,
+      bot_bubble_color: parsed.data.bot_bubble_color,
+      font_family: parsed.data.font_family,
+      widget_position: parsed.data.widget_position,
+      launcher_style: parsed.data.launcher_style,
+      window_width: parsed.data.window_width,
+      window_height: parsed.data.window_height,
+      border_radius: parsed.data.border_radius,
+      welcome_message: parsed.data.welcome_message,
+      bot_name: parsed.data.bot_name,
+      bot_avatar_url: parsed.data.bot_avatar_url
     });
 
     return jsonCorsResponse(request, result, 200);

@@ -1,4 +1,5 @@
 import { randomBytes } from "crypto";
+import { getEnv } from "@/config/env";
 import { HttpError } from "@/lib/httpError";
 import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
 import {
@@ -11,13 +12,15 @@ import {
   getDomainVerification,
   listTenantSources,
   listUserTenants,
-  markDomainVerified,
   replaceTenantSources,
   resolvePlatformSession,
   type SupportedService,
   type TenantBusinessProfile,
+  type TenantSummary,
+  updateDomainVerificationStatus,
   updateTenantAllowedDomain,
   updateTenantBusinessProfile,
+  updateTenantKnowledgeState,
   upsertDomainVerification,
   validatePlatformCredentials
 } from "@/platform/repository";
@@ -85,6 +88,161 @@ function buildDomainVerificationPayload(domain: string) {
   };
 }
 
+function shouldAutoIngestOnSignup(): boolean {
+  const configured = getEnv().PLATFORM_AUTO_INGEST_ON_SIGNUP?.trim().toLowerCase();
+  if (configured === "false" || configured === "0" || configured === "no") {
+    return false;
+  }
+
+  return true;
+}
+
+function summarizeIngestion(result: {
+  inserted_chunks: number;
+  fetched_documents: number;
+  skipped_documents: number;
+  errors: string[];
+}) {
+  if (result.errors.length > 0 && result.inserted_chunks === 0) {
+    return {
+      status: "error" as const,
+      message: result.errors[0] || "Knowledge base ingestion failed."
+    };
+  }
+
+  if (result.errors.length > 0) {
+    return {
+      status: "warning" as const,
+      message:
+        `Knowledge base updated with ${result.inserted_chunks} chunk${result.inserted_chunks === 1 ? "" : "s"}. ` +
+        `Some sources still need attention.`
+    };
+  }
+
+  if (result.inserted_chunks > 0) {
+    return {
+      status: "ready" as const,
+      message:
+        `Knowledge base ready. Indexed ${result.inserted_chunks} chunk${result.inserted_chunks === 1 ? "" : "s"} ` +
+        `from ${result.fetched_documents} document${result.fetched_documents === 1 ? "" : "s"}.`
+    };
+  }
+
+  return {
+    status: "warning" as const,
+    message: "No usable content was extracted yet. Review your website and sitemap URLs, then retry indexing."
+  };
+}
+
+function buildDnsStatusMessage(status: "pending" | "txt_not_found" | "txt_mismatch" | "verified") {
+  switch (status) {
+    case "verified":
+      return "DNS ownership is verified. Your live website widget is ready.";
+    case "txt_not_found":
+      return "TXT record not found. Add the verification record in your DNS settings and try again.";
+    case "txt_mismatch":
+      return "TXT record found, but the value does not match this workspace. Update the TXT value and retry verification.";
+    default:
+      return "Please add the TXT verification record to your DNS settings to connect the chatbot widget to your website.";
+  }
+}
+
+function toPlatformTenant(tenant: TenantSummary) {
+  const isVerified = tenant.domain_verification?.status === "verified";
+  return {
+    ...tenant,
+    widget: buildWidgetConfig({
+      tenantId: tenant.tenant_id,
+      domainVerified: isVerified,
+      businessProfile: tenant.business_profile
+    })
+  };
+}
+
+async function getOwnedTenantSummary(userId: string, tenantId: string) {
+  const tenants = await listUserTenants(userId);
+  const tenant = tenants.find((item) => item.tenant_id === tenantId);
+  if (!tenant) {
+    throw new HttpError(404, "Tenant not found");
+  }
+  return tenant;
+}
+
+async function runProvisioningIngest(input: { tenantId: string; sources: TenantSourceInput[] }) {
+  if (input.sources.length === 0) {
+    await updateTenantKnowledgeState(input.tenantId, {
+      status: "pending",
+      message: "Add a website, sitemap, FAQ, or document source to start building the knowledge base.",
+      last_ingested_at: null
+    });
+
+    return {
+      tenant_id: input.tenantId,
+      inserted_chunks: 0,
+      fetched_documents: 0,
+      skipped_documents: 0,
+      errors: []
+    };
+  }
+
+  if (!shouldAutoIngestOnSignup()) {
+    await updateTenantKnowledgeState(input.tenantId, {
+      status: "pending",
+      message: "Knowledge sources were saved. Start indexing to make the chatbot ready.",
+      last_ingested_at: null
+    });
+
+    return {
+      tenant_id: input.tenantId,
+      inserted_chunks: 0,
+      fetched_documents: 0,
+      skipped_documents: 0,
+      errors: []
+    };
+  }
+
+  await updateTenantKnowledgeState(input.tenantId, {
+    status: "processing",
+    message: "Scanning your website and sitemap to build the chatbot knowledge base.",
+    last_ingested_at: null
+  });
+
+  let result;
+  try {
+    result = await ingestKnowledgeForTenant({
+      tenant_id: input.tenantId,
+      sources: input.sources,
+      replace: true,
+      max_sitemap_urls: 40,
+      max_chunks: 700
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateTenantKnowledgeState(input.tenantId, {
+      status: "error",
+      message,
+      last_ingested_at: null
+    });
+
+    return {
+      tenant_id: input.tenantId,
+      inserted_chunks: 0,
+      fetched_documents: 0,
+      skipped_documents: 0,
+      errors: [message]
+    };
+  }
+
+  const summary = summarizeIngestion(result);
+  await updateTenantKnowledgeState(input.tenantId, {
+    status: summary.status,
+    message: summary.message,
+    last_ingested_at: new Date().toISOString()
+  });
+
+  return result;
+}
+
 export async function signupPlatformTenant(input: {
   full_name: string;
   email: string;
@@ -136,7 +294,7 @@ export async function signupPlatformTenant(input: {
   }
 
   const verificationPayload = buildDomainVerificationPayload(domain);
-  const verification = await upsertDomainVerification({
+  await upsertDomainVerification({
     tenantId: tenant.tenant_id,
     domain,
     txtName: verificationPayload.txt_name,
@@ -158,40 +316,19 @@ export async function signupPlatformTenant(input: {
     }))
   );
 
-  const ingest = await ingestKnowledgeForTenant({
-    tenant_id: tenant.tenant_id,
-    sources,
-    replace: true,
-    max_sitemap_urls: 40,
-    max_chunks: 700
-  }).catch((error) => ({
-    tenant_id: tenant.tenant_id,
-    inserted_chunks: 0,
-    fetched_documents: 0,
-    skipped_documents: 0,
-    errors: [error instanceof Error ? error.message : String(error)]
-  }));
+  const ingest = await runProvisioningIngest({
+    tenantId: tenant.tenant_id,
+    sources
+  });
 
   const session = await createPlatformSession(user.id);
-  const widget = buildWidgetConfig(tenant.tenant_id);
+  const latestTenant = await getOwnedTenantSummary(user.id, tenant.tenant_id);
 
   return {
     user,
     token: session.token,
     expires_at: session.expires_at,
-    tenant: {
-      tenant_id: tenant.tenant_id,
-      name: tenant.name,
-      domain,
-      business_profile: tenant.business_profile
-    },
-    domain_verification: {
-      status: verification.status,
-      txt_name: verification.txt_name,
-      txt_value: verification.txt_value,
-      verified_at: verification.verified_at
-    },
-    widget,
+    tenant: toPlatformTenant(latestTenant),
     ingest
   };
 }
@@ -234,7 +371,7 @@ export async function createPlatformWorkspace(input: {
   });
 
   const verificationPayload = buildDomainVerificationPayload(domain);
-  const verification = await upsertDomainVerification({
+  await upsertDomainVerification({
     tenantId: tenant.tenant_id,
     domain,
     txtName: verificationPayload.txt_name,
@@ -256,34 +393,15 @@ export async function createPlatformWorkspace(input: {
     }))
   );
 
-  const ingest = await ingestKnowledgeForTenant({
-    tenant_id: tenant.tenant_id,
-    sources,
-    replace: true,
-    max_sitemap_urls: 40,
-    max_chunks: 700
-  }).catch((error) => ({
-    tenant_id: tenant.tenant_id,
-    inserted_chunks: 0,
-    fetched_documents: 0,
-    skipped_documents: 0,
-    errors: [error instanceof Error ? error.message : String(error)]
-  }));
+  const ingest = await runProvisioningIngest({
+    tenantId: tenant.tenant_id,
+    sources
+  });
+
+  const latestTenant = await getOwnedTenantSummary(user.id, tenant.tenant_id);
 
   return {
-    tenant: {
-      tenant_id: tenant.tenant_id,
-      name: tenant.name,
-      domain,
-      business_profile: tenant.business_profile
-    },
-    domain_verification: {
-      status: verification.status,
-      txt_name: verification.txt_name,
-      txt_value: verification.txt_value,
-      verified_at: verification.verified_at
-    },
-    widget: buildWidgetConfig(tenant.tenant_id),
+    tenant: toPlatformTenant(latestTenant),
     ingest
   };
 }
@@ -297,22 +415,46 @@ export async function updatePlatformTenantProfile(input: {
   support_email?: string;
   support_cta_label?: string;
   business_description?: string;
+  primary_color?: string;
+  user_bubble_color?: string;
+  bot_bubble_color?: string;
+  font_family?: string;
+  widget_position?: "left" | "right";
+  launcher_style?: "rounded" | "pill" | "square" | "minimal";
+  window_width?: number;
+  window_height?: number;
+  border_radius?: number;
+  welcome_message?: string;
+  bot_name?: string;
+  bot_avatar_url?: string;
 }) {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
 
-  const profile = await updateTenantBusinessProfile(input.tenant_id, {
+  await updateTenantBusinessProfile(input.tenant_id, {
     business_type: input.business_type,
     supported_services: input.supported_services,
     support_phone: input.support_phone,
     support_email: input.support_email,
     support_cta_label: input.support_cta_label,
-    business_description: input.business_description
+    business_description: input.business_description,
+    primary_color: input.primary_color,
+    user_bubble_color: input.user_bubble_color,
+    bot_bubble_color: input.bot_bubble_color,
+    font_family: input.font_family,
+    widget_position: input.widget_position,
+    launcher_style: input.launcher_style,
+    window_width: input.window_width,
+    window_height: input.window_height,
+    border_radius: input.border_radius,
+    welcome_message: input.welcome_message,
+    bot_name: input.bot_name,
+    bot_avatar_url: input.bot_avatar_url
   } satisfies Partial<TenantBusinessProfile>);
 
+  const tenant = await getOwnedTenantSummary(user.id, input.tenant_id);
   return {
-    tenant_id: input.tenant_id,
-    business_profile: profile
+    tenant: toPlatformTenant(tenant)
   };
 }
 
@@ -327,30 +469,22 @@ export async function updatePlatformTenantDomain(input: {
   const website = normalizeWebsiteUrl(input.website_url);
   const domain = website.hostname.toLowerCase();
 
-  const tenant = await updateTenantAllowedDomain({
+  await updateTenantAllowedDomain({
     tenantId: input.tenant_id,
     domain
   });
 
   const verificationPayload = buildDomainVerificationPayload(domain);
-  const verification = await upsertDomainVerification({
+  await upsertDomainVerification({
     tenantId: input.tenant_id,
     domain,
     txtName: verificationPayload.txt_name,
     txtValue: verificationPayload.txt_value
   });
 
+  const tenant = await getOwnedTenantSummary(user.id, input.tenant_id);
   return {
-    tenant_id: input.tenant_id,
-    domain: tenant.domain,
-    allowed_domains: tenant.allowed_domains,
-    domain_verification: {
-      status: verification.status,
-      txt_name: verification.txt_name,
-      txt_value: verification.txt_value,
-      verified_at: verification.verified_at
-    },
-    widget: buildWidgetConfig(input.tenant_id)
+    tenant: toPlatformTenant(tenant)
   };
 }
 
@@ -363,10 +497,7 @@ export async function loginPlatformUser(input: { email: string; password: string
     user,
     token: session.token,
     expires_at: session.expires_at,
-    tenants: tenants.map((tenant) => ({
-      ...tenant,
-      widget: buildWidgetConfig(tenant.tenant_id)
-    }))
+    tenants: tenants.map(toPlatformTenant)
   };
 }
 
@@ -376,10 +507,7 @@ export async function getPlatformProfile(token: string) {
 
   return {
     user,
-    tenants: tenants.map((tenant) => ({
-      ...tenant,
-      widget: buildWidgetConfig(tenant.tenant_id)
-    }))
+    tenants: tenants.map(toPlatformTenant)
   };
 }
 
@@ -400,23 +528,27 @@ export async function verifyTenantDomain(input: {
     expectedValue: verification.txt_value
   });
 
-  if (dns.verified && verification.status !== "verified") {
-    await markDomainVerified(input.tenant_id);
-  }
+  const current = await updateDomainVerificationStatus({
+    tenantId: input.tenant_id,
+    status: dns.status,
+    records: dns.records,
+    errorMessage: dns.error ?? null
+  });
 
-  const current = await getDomainVerification(input.tenant_id);
   return {
     tenant_id: input.tenant_id,
-    verified: dns.verified,
+    verified: dns.status === "verified",
     records: dns.records,
-    domain_verification: current
-      ? {
-          status: current.status,
-          txt_name: current.txt_name,
-          txt_value: current.txt_value,
-          verified_at: current.verified_at
-        }
-      : null
+    message: buildDnsStatusMessage(current.status),
+    domain_verification: {
+      status: current.status,
+      txt_name: current.txt_name,
+      txt_value: current.txt_value,
+      last_checked_at: current.last_checked_at,
+      last_error: current.last_error,
+      last_seen_records: current.last_seen_records,
+      verified_at: current.verified_at
+    }
   };
 }
 
@@ -433,20 +565,56 @@ export async function runTenantIngestion(input: {
     throw new HttpError(400, "No tenant sources found. Add sitemap, URLs, FAQ or docs first.");
   }
 
-  const ingestion = await ingestKnowledgeForTenant({
-    tenant_id: input.tenant_id,
-    sources: sources.map((source) => ({
-      source_type: source.source_type,
-      source_value: source.source_value
-    })),
-    replace: Boolean(input.replace),
-    max_sitemap_urls: 40,
-    max_chunks: 700
+  await updateTenantKnowledgeState(input.tenant_id, {
+    status: "processing",
+    message: "Refreshing the knowledge base from your latest saved sources.",
+    last_ingested_at: null
+  });
+
+  let ingestion;
+  try {
+    ingestion = await ingestKnowledgeForTenant({
+      tenant_id: input.tenant_id,
+      sources: sources.map((source) => ({
+        source_type: source.source_type,
+        source_value: source.source_value
+      })),
+      replace: Boolean(input.replace),
+      max_sitemap_urls: 40,
+      max_chunks: 700
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const knowledge = await updateTenantKnowledgeState(input.tenant_id, {
+      status: "error",
+      message,
+      last_ingested_at: null
+    });
+
+    return {
+      tenant_id: input.tenant_id,
+      ingestion: {
+        tenant_id: input.tenant_id,
+        inserted_chunks: 0,
+        fetched_documents: 0,
+        skipped_documents: 0,
+        errors: [message]
+      },
+      knowledge_base: knowledge
+    };
+  }
+
+  const summary = summarizeIngestion(ingestion);
+  const knowledge = await updateTenantKnowledgeState(input.tenant_id, {
+    status: summary.status,
+    message: summary.message,
+    last_ingested_at: new Date().toISOString()
   });
 
   return {
     tenant_id: input.tenant_id,
-    ingestion
+    ingestion,
+    knowledge_base: knowledge
   };
 }
 
@@ -472,10 +640,16 @@ export async function replaceTenantSourcesForUser(input: {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
   await replaceTenantSources(input.tenant_id, input.sources);
+  const knowledge = await updateTenantKnowledgeState(input.tenant_id, {
+    status: "pending",
+    message: "Sources saved. Run indexing to refresh the chatbot knowledge base with the latest content.",
+    last_ingested_at: null
+  });
   const sources = await listTenantSources(input.tenant_id);
 
   return {
     tenant_id: input.tenant_id,
-    sources
+    sources,
+    knowledge_base: knowledge
   };
 }

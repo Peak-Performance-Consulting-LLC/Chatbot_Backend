@@ -1,0 +1,17 @@
+{
+  "framework": "nextjs",
+  "functions": {
+    "app/api/chat/stream/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/platform/ingest/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/platform/signup/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/platform/workspaces/route.ts": {
+      "maxDuration": 30
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { HttpError } from "@/lib/httpError";
 import { getRequestHost } from "@/lib/request";
 import { supabaseAdmin } from "@/lib/supabase";
+import { assertTenantOwnership, resolvePlatformSession } from "@/platform/repository";
 
 type TenantRow = {
   tenant_id: string;
@@ -12,6 +13,18 @@ type TenantRow = {
   support_email: string | null;
   support_cta_label: string;
   business_description: string | null;
+  primary_color: string;
+  user_bubble_color: string;
+  bot_bubble_color: string;
+  font_family: string;
+  widget_position: "left" | "right";
+  launcher_style: "rounded" | "pill" | "square" | "minimal";
+  window_width: number;
+  window_height: number;
+  border_radius: number;
+  welcome_message: string;
+  bot_name: string;
+  bot_avatar_url: string | null;
 };
 
 const defaultServices = ["flights"] as const;
@@ -58,11 +71,28 @@ function matchesDomain(host: string, rule: string): boolean {
   return false;
 }
 
+function parseBearerToken(request: Request): string | null {
+  const authHeader = request.headers.get("authorization")?.trim();
+  if (!authHeader?.toLowerCase().startsWith("bearer ")) {
+    return null;
+  }
+  return authHeader.slice(7).trim() || null;
+}
+
+function getClaimedSiteHost(request: Request): string | null {
+  const claimedHost = request.headers.get("x-tenant-site-host")?.trim();
+  if (claimedHost) {
+    return normalizeDomain(claimedHost);
+  }
+
+  return getRequestHost(request);
+}
+
 export async function getTenantById(tenantId: string): Promise<TenantRow> {
   const { data, error } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, business_description"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
     )
     .eq("tenant_id", tenantId)
     .single();
@@ -70,7 +100,9 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
   if (error) {
     const missingColumns =
       error.message.includes("column tenants.business_type does not exist") ||
-      error.message.includes("column tenants.supported_services does not exist");
+      error.message.includes("column tenants.supported_services does not exist") ||
+      error.message.includes("column tenants.primary_color does not exist") ||
+      error.message.includes("column tenants.welcome_message does not exist");
 
     if (missingColumns) {
       throw new HttpError(
@@ -96,6 +128,18 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     support_email?: string | null;
     support_cta_label?: string | null;
     business_description?: string | null;
+    primary_color?: string | null;
+    user_bubble_color?: string | null;
+    bot_bubble_color?: string | null;
+    font_family?: string | null;
+    widget_position?: "left" | "right" | null;
+    launcher_style?: "rounded" | "pill" | "square" | "minimal" | null;
+    window_width?: number | null;
+    window_height?: number | null;
+    border_radius?: number | null;
+    welcome_message?: string | null;
+    bot_name?: string | null;
+    bot_avatar_url?: string | null;
   };
 
   return {
@@ -107,7 +151,22 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     support_phone: row.support_phone?.trim() || null,
     support_email: row.support_email?.trim() || null,
     support_cta_label: row.support_cta_label?.trim() || "Connect with a specialist",
-    business_description: row.business_description?.trim() || null
+    business_description: row.business_description?.trim() || null,
+    primary_color: row.primary_color?.trim() || "#006d77",
+    user_bubble_color: row.user_bubble_color?.trim() || "#006d77",
+    bot_bubble_color: row.bot_bubble_color?.trim() || "#edf6f9",
+    font_family: row.font_family?.trim() || "Manrope",
+    widget_position: row.widget_position === "left" ? "left" : "right",
+    launcher_style:
+      row.launcher_style === "pill" || row.launcher_style === "square" || row.launcher_style === "minimal"
+        ? row.launcher_style
+        : "rounded",
+    window_width: row.window_width && row.window_width > 0 ? row.window_width : 380,
+    window_height: row.window_height && row.window_height > 0 ? row.window_height : 640,
+    border_radius: row.border_radius && row.border_radius > 0 ? row.border_radius : 18,
+    welcome_message: row.welcome_message?.trim() || "Welcome. How can I help today?",
+    bot_name: row.bot_name?.trim() || "AeroConcierge",
+    bot_avatar_url: row.bot_avatar_url?.trim() || null
   };
 }
 
@@ -121,7 +180,7 @@ async function isTenantDomainVerified(tenantId: string): Promise<boolean> {
   if (error) {
     const missingTable =
       error.message.includes("Could not find the table 'public.tenant_domain_verifications'") ||
-      error.message.includes("relation \"public.tenant_domain_verifications\" does not exist");
+      error.message.includes('relation "public.tenant_domain_verifications" does not exist');
 
     if (missingTable) {
       if (process.env.NODE_ENV !== "production") {
@@ -141,9 +200,29 @@ async function isTenantDomainVerified(tenantId: string): Promise<boolean> {
   return (data as { status?: string }).status === "verified";
 }
 
+async function allowPortalPreviewAccess(request: Request, tenantId: string): Promise<boolean> {
+  const token = parseBearerToken(request);
+  if (!token) {
+    return false;
+  }
+
+  try {
+    const user = await resolvePlatformSession(token);
+    await assertTenantOwnership(user.id, tenantId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function assertTenantDomainAccess(request: Request, tenantId: string): Promise<TenantRow> {
   const tenant = await getTenantById(tenantId);
-  const requestHost = getRequestHost(request);
+
+  if (await allowPortalPreviewAccess(request, tenantId)) {
+    return tenant;
+  }
+
+  const requestHost = getClaimedSiteHost(request);
 
   if (!requestHost) {
     if (process.env.NODE_ENV === "production") {
@@ -165,11 +244,12 @@ export async function assertTenantDomainAccess(request: Request, tenantId: strin
     throw new HttpError(403, `Domain '${requestHost}' is not allowed for tenant '${tenantId}'`);
   }
 
-  if (process.env.NODE_ENV === "production") {
-    const verified = await isTenantDomainVerified(tenantId);
-    if (!verified) {
-      throw new HttpError(403, `Domain for tenant '${tenantId}' is not DNS verified yet`);
-    }
+  const verified = await isTenantDomainVerified(tenantId);
+  if (!verified) {
+    throw new HttpError(
+      403,
+      "You can continue testing your chatbot inside the portal. To use it on your website via widget/embed, please complete DNS verification first."
+    );
   }
 
   return tenant;

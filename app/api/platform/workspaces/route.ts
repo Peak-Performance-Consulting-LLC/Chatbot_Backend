@@ -6,6 +6,7 @@ import { createPlatformWorkspace } from "@/platform/service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);

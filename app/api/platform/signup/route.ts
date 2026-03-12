@@ -5,6 +5,7 @@ import { toHttpError } from "@/lib/httpError";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 30;
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
@@ -33,4 +34,3 @@ export async function POST(request: Request) {
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
   }
 }
-
