@@ -36,6 +36,8 @@ export async function PATCH(request: Request) {
       support_phone: parsed.data.support_phone,
       support_email: parsed.data.support_email,
       support_cta_label: parsed.data.support_cta_label,
+      header_cta_label: parsed.data.header_cta_label,
+      header_cta_notice: parsed.data.header_cta_notice,
       business_description: parsed.data.business_description,
       primary_color: parsed.data.primary_color,
       user_bubble_color: parsed.data.user_bubble_color,

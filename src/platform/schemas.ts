@@ -53,6 +53,8 @@ export const platformTenantProfileSchema = z.object({
   support_phone: z.string().trim().min(7).max(40).optional(),
   support_email: z.string().trim().email().max(160).optional(),
   support_cta_label: z.string().trim().min(3).max(80).optional(),
+  header_cta_label: z.string().trim().min(2).max(40).optional(),
+  header_cta_notice: z.string().trim().min(8).max(180).optional(),
   business_description: z.string().trim().max(1000).optional(),
   primary_color: colorSchema.optional(),
   user_bubble_color: colorSchema.optional(),

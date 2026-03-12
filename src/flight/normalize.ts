@@ -204,9 +204,10 @@ export function parsePassengers(input: string): PassengerCounts | null {
     .replace(/\bkids?\b/g, "children")
     .replace(/\bbabies\b/g, "infants");
 
-  const adultsMatch = normalizedText.match(/(\d+)\s*adults?/);
-  const childrenMatch = normalizedText.match(/(\d+)\s*(children?|child)/);
-  const infantsMatch = normalizedText.match(/(\d+)\s*(infants?|infant)/);
+  // Support both "2 adults" (number-first) and "Adults 2" (word-first) formats
+  const adultsMatch = normalizedText.match(/(\d+)\s*adults?/) ?? normalizedText.match(/adults?\s*(\d+)/);
+  const childrenMatch = normalizedText.match(/(\d+)\s*(?:children?|child)/) ?? normalizedText.match(/(?:children?|child)\s*(\d+)/);
+  const infantsMatch = normalizedText.match(/(\d+)\s*(?:infants?|infant)/) ?? normalizedText.match(/(?:infants?|infant)\s*(\d+)/);
 
   if (adultsMatch || childrenMatch || infantsMatch) {
     const adults = Number(adultsMatch?.[1] ?? "0");

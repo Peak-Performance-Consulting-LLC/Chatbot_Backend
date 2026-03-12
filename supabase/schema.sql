@@ -33,7 +33,9 @@ alter table public.tenants
   add column if not exists border_radius integer not null default 18,
   add column if not exists welcome_message text,
   add column if not exists bot_name text not null default 'AeroConcierge',
-  add column if not exists bot_avatar_url text;
+  add column if not exists bot_avatar_url text,
+  add column if not exists header_cta_label text not null default 'New',
+  add column if not exists header_cta_notice text not null default 'Hi! I am your AI assistant. Ask me anything about your trip.';
 
 alter table public.tenants
   drop constraint if exists tenants_knowledge_status_check,

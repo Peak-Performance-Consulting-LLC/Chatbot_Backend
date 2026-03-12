@@ -36,6 +36,8 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column tenants.welcome_message does not exist") ||
     message.includes("column tenants.bot_name does not exist") ||
     message.includes("column tenants.bot_avatar_url does not exist") ||
+    message.includes("column tenants.header_cta_label does not exist") ||
+    message.includes("column tenants.header_cta_notice does not exist") ||
     message.includes("column tenant_domain_verifications.last_checked_at does not exist") ||
     message.includes("column tenant_domain_verifications.last_error does not exist") ||
     message.includes("column tenant_domain_verifications.last_seen_records does not exist")
@@ -104,6 +106,8 @@ export type TenantBusinessProfile = {
   support_phone: string | null;
   support_email: string | null;
   support_cta_label: string;
+  header_cta_label: string;
+  header_cta_notice: string;
   business_description: string | null;
   primary_color: string;
   user_bubble_color: string;
@@ -289,6 +293,8 @@ function normalizeBusinessProfile(
 ): TenantBusinessProfile {
   const supported = normalizeSupportedServices(input?.supported_services as string[] | undefined);
   const supportCtaLabel = input?.support_cta_label?.trim();
+  const headerCtaLabel = input?.header_cta_label?.trim();
+  const headerCtaNotice = input?.header_cta_notice?.trim();
   const botName = input?.bot_name?.trim();
 
   return {
@@ -297,6 +303,8 @@ function normalizeBusinessProfile(
     support_phone: normalizeOptionalText(input?.support_phone),
     support_email: normalizeOptionalText(input?.support_email),
     support_cta_label: supportCtaLabel || "Connect with a specialist",
+    header_cta_label: headerCtaLabel || "New",
+    header_cta_notice: headerCtaNotice || "Hi! I am your AI assistant. Ask me anything about your trip.",
     business_description: normalizeOptionalText(input?.business_description),
     primary_color: normalizeHexColor(input?.primary_color, defaultPalette.primary_color),
     user_bubble_color: normalizeHexColor(input?.user_bubble_color, defaultPalette.user_bubble_color),
@@ -570,6 +578,8 @@ export async function createTenantForUser(input: {
     support_phone: businessProfile.support_phone,
     support_email: businessProfile.support_email,
     support_cta_label: businessProfile.support_cta_label,
+    header_cta_label: businessProfile.header_cta_label,
+    header_cta_notice: businessProfile.header_cta_notice,
     business_description: businessProfile.business_description,
     knowledge_status: "pending",
     knowledge_message: "Knowledge base ingestion will begin as soon as the initial website sources are processed.",
@@ -592,7 +602,7 @@ export async function createTenantForUser(input: {
     .from("tenants")
     .insert(tenantPayload)
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
     )
     .single();
 
@@ -620,6 +630,8 @@ export async function createTenantForUser(input: {
     support_phone: string | null;
     support_email: string | null;
     support_cta_label: string | null;
+    header_cta_label: string | null;
+    header_cta_notice: string | null;
     business_description: string | null;
     primary_color: string | null;
     user_bubble_color: string | null;
@@ -646,6 +658,8 @@ export async function createTenantForUser(input: {
         support_phone: tenantRow.support_phone,
         support_email: tenantRow.support_email,
         support_cta_label: tenantRow.support_cta_label || undefined,
+        header_cta_label: tenantRow.header_cta_label || undefined,
+        header_cta_notice: tenantRow.header_cta_notice || undefined,
         business_description: tenantRow.business_description,
         primary_color: tenantRow.primary_color || undefined,
         user_bubble_color: tenantRow.user_bubble_color || undefined,
@@ -880,7 +894,7 @@ export async function updateTenantBusinessProfile(
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "name, business_type, supported_services, support_phone, support_email, support_cta_label, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "name, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
     )
     .eq("tenant_id", tenantId)
     .maybeSingle();
@@ -900,6 +914,8 @@ export async function updateTenantBusinessProfile(
     support_phone: string | null;
     support_email: string | null;
     support_cta_label: string | null;
+    header_cta_label: string | null;
+    header_cta_notice: string | null;
     business_description: string | null;
     primary_color: string | null;
     user_bubble_color: string | null;
@@ -925,6 +941,8 @@ export async function updateTenantBusinessProfile(
       support_phone: patch.support_phone ?? current.support_phone,
       support_email: patch.support_email ?? current.support_email,
       support_cta_label: patch.support_cta_label ?? current.support_cta_label ?? undefined,
+      header_cta_label: patch.header_cta_label ?? current.header_cta_label ?? undefined,
+      header_cta_notice: patch.header_cta_notice ?? current.header_cta_notice ?? undefined,
       business_description: patch.business_description ?? current.business_description,
       primary_color: patch.primary_color ?? current.primary_color ?? undefined,
       user_bubble_color: patch.user_bubble_color ?? current.user_bubble_color ?? undefined,
@@ -950,6 +968,8 @@ export async function updateTenantBusinessProfile(
       support_phone: next.support_phone,
       support_email: next.support_email,
       support_cta_label: next.support_cta_label,
+      header_cta_label: next.header_cta_label,
+      header_cta_notice: next.header_cta_notice,
       business_description: next.business_description,
       primary_color: next.primary_color,
       user_bubble_color: next.user_bubble_color,
@@ -991,7 +1011,7 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
   const { data: tenants, error: tenantsError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
     )
     .in("tenant_id", tenantIds);
 
@@ -1022,6 +1042,8 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     support_phone: string | null;
     support_email: string | null;
     support_cta_label: string | null;
+    header_cta_label: string | null;
+    header_cta_notice: string | null;
     business_description: string | null;
     knowledge_status: string | null;
     knowledge_message: string | null;
@@ -1049,6 +1071,8 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
         support_phone: tenant.support_phone,
         support_email: tenant.support_email,
         support_cta_label: tenant.support_cta_label || undefined,
+        header_cta_label: tenant.header_cta_label || undefined,
+        header_cta_notice: tenant.header_cta_notice || undefined,
         business_description: tenant.business_description,
         primary_color: tenant.primary_color || undefined,
         user_bubble_color: tenant.user_bubble_color || undefined,

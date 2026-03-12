@@ -414,6 +414,8 @@ export async function updatePlatformTenantProfile(input: {
   support_phone?: string;
   support_email?: string;
   support_cta_label?: string;
+  header_cta_label?: string;
+  header_cta_notice?: string;
   business_description?: string;
   primary_color?: string;
   user_bubble_color?: string;
@@ -437,6 +439,8 @@ export async function updatePlatformTenantProfile(input: {
     support_phone: input.support_phone,
     support_email: input.support_email,
     support_cta_label: input.support_cta_label,
+    header_cta_label: input.header_cta_label,
+    header_cta_notice: input.header_cta_notice,
     business_description: input.business_description,
     primary_color: input.primary_color,
     user_bubble_color: input.user_bubble_color,
