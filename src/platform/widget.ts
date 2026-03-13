@@ -67,8 +67,9 @@ export function buildWidgetConfig(input: {
   const iframeRight = input.businessProfile.widget_position === "left" ? "auto" : "16px";
   const iframeLeft = input.businessProfile.widget_position === "left" ? "16px" : "auto";
   const widgetOrigin = new URL(widgetHostUrl).origin;
-  const collapsedWidth = Math.min(360, Math.max(320, input.businessProfile.window_width));
-  const collapsedHeight = 344;
+  const peekWidth = Math.min(360, Math.max(320, input.businessProfile.window_width));
+  const peekHeight = 344;
+  const launcherSize = 76;
   const expandedHeight = input.businessProfile.window_height + 78;
 
   const script = `<script>
@@ -76,8 +77,9 @@ export function buildWidgetConfig(input: {
   var widgetOrigin = '${escapeAttribute(widgetOrigin)}';
   var expandedWidth = '${input.businessProfile.window_width}px';
   var expandedHeight = '${expandedHeight}px';
-  var collapsedWidth = '${collapsedWidth}px';
-  var collapsedHeight = '${collapsedHeight}px';
+  var peekWidth = '${peekWidth}px';
+  var peekHeight = '${peekHeight}px';
+  var launcherSize = '${launcherSize}px';
   var expandedRadius = '${input.businessProfile.border_radius}px';
   var iframe = document.createElement('iframe');
   iframe.src = '${escapeAttribute(embedUrl)}';
@@ -97,20 +99,38 @@ export function buildWidgetConfig(input: {
   iframe.allow = 'clipboard-write';
   iframe.setAttribute('scrolling', 'no');
 
-  function applyState(open) {
-    iframe.style.width = open ? expandedWidth : collapsedWidth;
-    iframe.style.height = open ? expandedHeight : collapsedHeight;
-    iframe.style.borderRadius = open ? expandedRadius : '0';
+  function applyState(mode) {
+    if (mode === 'open') {
+      iframe.style.width = expandedWidth;
+      iframe.style.height = expandedHeight;
+      iframe.style.borderRadius = expandedRadius;
+      return;
+    }
+
+    if (mode === 'launcher') {
+      iframe.style.width = launcherSize;
+      iframe.style.height = launcherSize;
+      iframe.style.borderRadius = '999px';
+      return;
+    }
+
+    iframe.style.width = peekWidth;
+    iframe.style.height = peekHeight;
+    iframe.style.borderRadius = '0';
   }
 
-  applyState(false);
+  applyState('peek');
   document.body.appendChild(iframe);
 
   window.addEventListener('message', function (event) {
     if (!event || event.origin !== widgetOrigin) return;
     if (event.source !== iframe.contentWindow) return;
     if (!event.data || event.data.type !== 'aeroconcierge:widget-state') return;
-    applyState(Boolean(event.data.open));
+    var nextMode = event.data.mode;
+    if (nextMode !== 'open' && nextMode !== 'peek' && nextMode !== 'launcher') {
+      nextMode = event.data.open ? 'open' : 'peek';
+    }
+    applyState(nextMode);
   });
 })();
 </script>`;
