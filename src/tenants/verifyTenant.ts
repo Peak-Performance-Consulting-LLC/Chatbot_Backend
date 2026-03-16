@@ -12,6 +12,8 @@ type TenantRow = {
   support_phone: string | null;
   support_email: string | null;
   support_cta_label: string;
+  header_cta_label: string;
+  header_cta_notice: string;
   business_description: string | null;
   primary_color: string;
   user_bubble_color: string;
@@ -92,7 +94,7 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
   const { data, error } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
     )
     .eq("tenant_id", tenantId)
     .single();
@@ -127,6 +129,8 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     support_phone?: string | null;
     support_email?: string | null;
     support_cta_label?: string | null;
+    header_cta_label?: string | null;
+    header_cta_notice?: string | null;
     business_description?: string | null;
     primary_color?: string | null;
     user_bubble_color?: string | null;
@@ -151,6 +155,8 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     support_phone: row.support_phone?.trim() || null,
     support_email: row.support_email?.trim() || null,
     support_cta_label: row.support_cta_label?.trim() || "Connect with a specialist",
+    header_cta_label: row.header_cta_label?.trim() || "New",
+    header_cta_notice: row.header_cta_notice?.trim() || "Hi! I am your AI assistant. Ask me anything about your trip.",
     business_description: row.business_description?.trim() || null,
     primary_color: row.primary_color?.trim() || "#006d77",
     user_bubble_color: row.user_bubble_color?.trim() || "#006d77",

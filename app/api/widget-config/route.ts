@@ -1,0 +1,62 @@
+import { z } from "zod";
+import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
+import { toHttpError } from "@/lib/httpError";
+import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const widgetConfigQuerySchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80)
+});
+
+export async function OPTIONS(request: Request) {
+  return optionsCorsResponse(request);
+}
+
+export async function GET(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const parsed = widgetConfigQuerySchema.safeParse({
+      tenant_id: url.searchParams.get("tenant_id")
+    });
+
+    if (!parsed.success) {
+      return jsonCorsResponse(
+        request,
+        {
+          error: "Invalid query parameters",
+          details: parsed.error.flatten()
+        },
+        400
+      );
+    }
+
+    const tenant = await assertTenantDomainAccess(request, parsed.data.tenant_id);
+
+    return jsonCorsResponse(request, {
+      tenant_id: tenant.tenant_id,
+      appearance: {
+        primaryColor: tenant.primary_color,
+        userBubbleColor: tenant.user_bubble_color,
+        botBubbleColor: tenant.bot_bubble_color,
+        fontFamily: tenant.font_family,
+        widgetPosition: tenant.widget_position,
+        launcherStyle: tenant.launcher_style,
+        windowWidth: tenant.window_width,
+        windowHeight: tenant.window_height,
+        borderRadius: tenant.border_radius,
+        botName: tenant.bot_name,
+        welcomeMessage: tenant.welcome_message,
+        botAvatarUrl: tenant.bot_avatar_url || undefined
+      },
+      supportPhone: tenant.support_phone || undefined,
+      supportCtaLabel: tenant.support_cta_label,
+      headerCtaLabel: tenant.header_cta_label,
+      headerCtaNotice: tenant.header_cta_notice
+    });
+  } catch (error) {
+    const asHttpError = toHttpError(error);
+    return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
+  }
+}
