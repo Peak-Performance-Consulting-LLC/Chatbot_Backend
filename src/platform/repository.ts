@@ -279,6 +279,39 @@ export function normalizeDomain(input: string): string {
   }
 }
 
+function shouldAddWwwVariant(domain: string): boolean {
+  const bareDomain = domain.startsWith("www.") ? domain.slice(4) : domain;
+  if (!bareDomain || bareDomain === "localhost") {
+    return false;
+  }
+
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(bareDomain)) {
+    return false;
+  }
+
+  if (bareDomain.startsWith("[") || bareDomain.endsWith("]") || bareDomain.includes(":")) {
+    return false;
+  }
+
+  return bareDomain.includes(".");
+}
+
+export function buildAllowedDomains(domainInput: string): string[] {
+  const primaryDomain = normalizeDomain(domainInput);
+  const bareDomain = primaryDomain.startsWith("www.") ? primaryDomain.slice(4) : primaryDomain;
+  const domains = [primaryDomain];
+
+  if (primaryDomain.startsWith("www.") && bareDomain && bareDomain !== primaryDomain) {
+    domains.push(bareDomain);
+  }
+
+  if (shouldAddWwwVariant(primaryDomain) && !primaryDomain.startsWith("www.")) {
+    domains.push(`www.${bareDomain}`);
+  }
+
+  return Array.from(new Set(domains));
+}
+
 function slugify(input: string): string {
   return input
     .toLowerCase()
@@ -357,6 +390,25 @@ function mapDomainVerification(row: DomainVerificationRow | null) {
   };
 }
 
+async function findTenantConflictByAllowedDomains(domains: string[], excludeTenantId?: string): Promise<string | null> {
+  if (domains.length === 0) {
+    return null;
+  }
+
+  const query = supabaseAdmin
+    .from("tenants")
+    .select("tenant_id")
+    .overlaps("allowed_domains", domains);
+  const filteredQuery = excludeTenantId ? query.neq("tenant_id", excludeTenantId) : query;
+  const { data, error } = await filteredQuery.limit(1).maybeSingle();
+
+  if (error) {
+    throw new HttpError(500, `Domain lookup failed: ${error.message}`);
+  }
+
+  return (data as { tenant_id?: string } | null)?.tenant_id ?? null;
+}
+
 async function tenantExists(tenantId: string): Promise<boolean> {
   const { data, error } = await supabaseAdmin
     .from("tenants")
@@ -411,18 +463,7 @@ export async function deletePlatformUserById(userId: string): Promise<void> {
 }
 
 export async function findTenantIdByDomain(domainInput: string): Promise<string | null> {
-  const domain = normalizeDomain(domainInput);
-  const { data, error } = await supabaseAdmin
-    .from("tenant_domain_verifications")
-    .select("tenant_id")
-    .eq("domain", domain)
-    .maybeSingle();
-
-  if (error) {
-    throw new HttpError(500, `Domain lookup failed: ${error.message}`);
-  }
-
-  return (data as { tenant_id?: string } | null)?.tenant_id ?? null;
+  return findTenantConflictByAllowedDomains(buildAllowedDomains(domainInput));
 }
 
 export async function getPlatformUserById(userId: string): Promise<PlatformUserRow | null> {
@@ -550,21 +591,13 @@ export async function createTenantForUser(input: {
   businessProfile?: Partial<TenantBusinessProfile>;
 }): Promise<{ tenant_id: string; name: string; allowed_domains: string[]; business_profile: TenantBusinessProfile }> {
   const domain = normalizeDomain(input.domain);
+  const allowedDomains = buildAllowedDomains(domain);
   const businessProfile = normalizeBusinessProfile(input.businessProfile, {
     companyName: input.companyName
   });
 
-  const { data: existingDomain, error: domainError } = await supabaseAdmin
-    .from("tenant_domain_verifications")
-    .select("tenant_id")
-    .eq("domain", domain)
-    .maybeSingle();
-
-  if (domainError) {
-    throw new HttpError(500, `Domain lookup failed: ${domainError.message}`);
-  }
-
-  if (existingDomain?.tenant_id) {
+  const existingTenantId = await findTenantConflictByAllowedDomains(allowedDomains);
+  if (existingTenantId) {
     throw new HttpError(409, "This domain is already connected to another tenant");
   }
 
@@ -572,7 +605,7 @@ export async function createTenantForUser(input: {
   const tenantPayload = {
     tenant_id: tenantId,
     name: input.companyName.trim(),
-    allowed_domains: [domain],
+    allowed_domains: allowedDomains,
     business_type: businessProfile.business_type,
     supported_services: businessProfile.supported_services,
     support_phone: businessProfile.support_phone,
@@ -732,25 +765,17 @@ export async function updateTenantAllowedDomain(input: {
   domain: string;
 }): Promise<{ tenant_id: string; domain: string; allowed_domains: string[] }> {
   const domain = normalizeDomain(input.domain);
+  const allowedDomains = buildAllowedDomains(domain);
 
-  const { data: existingDomain, error: domainError } = await supabaseAdmin
-    .from("tenant_domain_verifications")
-    .select("tenant_id")
-    .eq("domain", domain)
-    .maybeSingle();
-
-  if (domainError) {
-    throw new HttpError(500, `Domain lookup failed: ${domainError.message}`);
-  }
-
-  if (existingDomain?.tenant_id && existingDomain.tenant_id !== input.tenantId) {
+  const conflictingTenantId = await findTenantConflictByAllowedDomains(allowedDomains, input.tenantId);
+  if (conflictingTenantId) {
     throw new HttpError(409, "This domain is already connected to another tenant");
   }
 
   const { data, error } = await supabaseAdmin
     .from("tenants")
     .update({
-      allowed_domains: [domain]
+      allowed_domains: allowedDomains
     })
     .eq("tenant_id", input.tenantId)
     .select("tenant_id, allowed_domains")

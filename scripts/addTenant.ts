@@ -28,6 +28,39 @@ function normalizeDomain(domain: string): string {
     .split("/")[0] || domain.trim().toLowerCase();
 }
 
+function shouldAddWwwVariant(domain: string): boolean {
+  const bareDomain = domain.startsWith("www.") ? domain.slice(4) : domain;
+  if (!bareDomain || bareDomain === "localhost") {
+    return false;
+  }
+
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(bareDomain)) {
+    return false;
+  }
+
+  if (bareDomain.startsWith("[") || bareDomain.endsWith("]") || bareDomain.includes(":")) {
+    return false;
+  }
+
+  return bareDomain.includes(".");
+}
+
+function buildAllowedDomains(domainInput: string): string[] {
+  const primaryDomain = normalizeDomain(domainInput);
+  const bareDomain = primaryDomain.startsWith("www.") ? primaryDomain.slice(4) : primaryDomain;
+  const domains = [primaryDomain];
+
+  if (primaryDomain.startsWith("www.") && bareDomain && bareDomain !== primaryDomain) {
+    domains.push(bareDomain);
+  }
+
+  if (shouldAddWwwVariant(primaryDomain) && !primaryDomain.startsWith("www.")) {
+    domains.push(`www.${bareDomain}`);
+  }
+
+  return Array.from(new Set(domains));
+}
+
 async function main() {
   loadLocalEnv();
 
@@ -36,10 +69,14 @@ async function main() {
     throw new Error("Missing --tenant_id=...");
   }
 
-  const domains = (args.domains || "")
-    .split(",")
-    .map((d) => normalizeDomain(d))
-    .filter(Boolean);
+  const domains = Array.from(
+    new Set(
+      (args.domains || "")
+        .split(",")
+        .flatMap((d) => buildAllowedDomains(d))
+        .filter(Boolean)
+    )
+  );
 
   if (domains.length === 0) {
     throw new Error("Missing --domains=domain1.com,www.domain1.com,localhost");
