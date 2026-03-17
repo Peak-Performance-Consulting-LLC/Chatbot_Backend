@@ -5,7 +5,10 @@ const optionalUrlSchema = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
   urlSchema.optional()
 );
-const colorSchema = z.string().trim().regex(/^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})$/, "Use a valid hex color");
+const colorSchema = z.string().trim().regex(
+  /^(#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+))?\s*\))$/,
+  "Use a valid hex or rgba color"
+);
 
 export const supportedServiceSchema = z.enum(["flights", "hotels", "cars", "cruises"]);
 export const widgetPositionSchema = z.enum(["left", "right"]);
