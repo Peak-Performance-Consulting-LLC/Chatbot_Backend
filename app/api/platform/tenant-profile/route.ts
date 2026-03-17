@@ -3,6 +3,7 @@ import { platformTenantProfileSchema } from "@/platform/schemas";
 import { updatePlatformTenantProfile } from "@/platform/service";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
+import { clearTenantCache } from "@/tenants/verifyTenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,7 +54,11 @@ export async function PATCH(request: Request) {
       bot_avatar_url: parsed.data.bot_avatar_url
     });
 
+    // Immediately evict in-process cache so widget-config returns fresh values
+    clearTenantCache(parsed.data.tenant_id);
+
     return jsonCorsResponse(request, result, 200);
+
   } catch (error) {
     const asHttpError = toHttpError(error);
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);

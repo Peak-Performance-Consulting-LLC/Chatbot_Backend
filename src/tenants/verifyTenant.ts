@@ -215,6 +215,15 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
   return result;
 }
 
+/** Immediately evict a tenant from the in-process cache.
+ *  Call this after any update to business_profile so the widget-config
+ *  endpoint returns fresh appearance values on the very next request.
+ */
+export function clearTenantCache(tenantId: string): void {
+  tenantCache.delete(tenantId);
+  verificationCache.delete(tenantId);
+}
+
 async function isTenantDomainVerified(tenantId: string): Promise<boolean> {
   const cachedVerification = verificationCache.get(tenantId);
   if (cachedVerification && cachedVerification.expiresAt > Date.now()) {
