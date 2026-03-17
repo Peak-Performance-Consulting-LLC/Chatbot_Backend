@@ -121,12 +121,14 @@ export function buildWidgetConfig(input: {
     }
 
     return {
-      expandedWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 24), 296, 356),
-      expandedHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 118), 460, 620),
-      peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 24), 280, 312),
-      peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 140), 280, 320),
-      launcherSize: 64,
-      expandedRadius: Math.min(desktopExpandedRadius, 18)
+      expandedWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 32), 300, 350),
+      expandedHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 164), 440, 560),
+      compactWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 36), 296, 340),
+      compactHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 260), 340, 430),
+      peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 40), 260, 296),
+      peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 220), 220, 284),
+      launcherSize: 58,
+      expandedRadius: Math.min(desktopExpandedRadius, 20)
     };
   }
 
@@ -137,6 +139,13 @@ export function buildWidgetConfig(input: {
     if (mode === 'open') {
       iframe.style.width = sizing.expandedWidth + 'px';
       iframe.style.height = sizing.expandedHeight + 'px';
+      iframe.style.borderRadius = sizing.expandedRadius + 'px';
+      return;
+    }
+
+    if (mode === 'open-compact') {
+      iframe.style.width = (sizing.compactWidth || sizing.expandedWidth) + 'px';
+      iframe.style.height = (sizing.compactHeight || sizing.expandedHeight) + 'px';
       iframe.style.borderRadius = sizing.expandedRadius + 'px';
       return;
     }
@@ -164,7 +173,7 @@ export function buildWidgetConfig(input: {
     if (event.source !== iframe.contentWindow) return;
     if (!event.data || event.data.type !== 'aeroconcierge:widget-state') return;
     var nextMode = event.data.mode;
-    if (nextMode !== 'open' && nextMode !== 'peek' && nextMode !== 'launcher') {
+    if (nextMode !== 'open' && nextMode !== 'open-compact' && nextMode !== 'peek' && nextMode !== 'launcher') {
       nextMode = event.data.open ? 'open' : 'peek';
     }
     applyState(nextMode);
