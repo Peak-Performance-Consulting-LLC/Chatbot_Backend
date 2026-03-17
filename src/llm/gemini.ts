@@ -2,6 +2,37 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { assertEnvVars, getEnv } from "@/config/env";
 
 let genAI: GoogleGenerativeAI | null = null;
+const EMBEDDING_CACHE_TTL_MS = 10 * 60 * 1000;
+const EMBEDDING_CACHE_MAX_ENTRIES = 200;
+const embeddingCache = new Map<string, { values: number[]; expiresAt: number }>();
+
+type GeminiRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
+function normalizeCacheKey(input: string) {
+  return input.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function pruneExpiredEntries<T>(cache: Map<string, { expiresAt: number; values?: T } | { expiresAt: number }>) {
+  const now = Date.now();
+  for (const [key, value] of cache.entries()) {
+    if (value.expiresAt <= now) {
+      cache.delete(key);
+    }
+  }
+}
+
+function trimCache<T>(cache: Map<string, T>, maxEntries: number) {
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
+}
 
 function getGeminiClient() {
   if (genAI) {
@@ -19,6 +50,69 @@ function getChatModelName(): string {
 
 function getEmbeddingModelName(): string {
   return getEnv().GEMINI_EMBEDDING_MODEL;
+}
+
+function toGeminiRequestOptions(input?: GeminiRequestOptions) {
+  if (!input?.signal && typeof input?.timeoutMs !== "number") {
+    return undefined;
+  }
+
+  return {
+    ...(input?.signal ? { signal: input.signal } : {}),
+    ...(typeof input?.timeoutMs === "number" ? { timeout: input.timeoutMs } : {})
+  };
+}
+
+function createAbortError(message: string, name: "AbortError" | "TimeoutError") {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+function createFetchAbortSignal(input?: GeminiRequestOptions): {
+  signal?: AbortSignal;
+  cleanup: () => void;
+} {
+  if (!input?.signal && typeof input?.timeoutMs !== "number") {
+    return {
+      signal: undefined,
+      cleanup() {}
+    };
+  }
+
+  if (input?.signal && typeof input?.timeoutMs !== "number") {
+    return {
+      signal: input.signal,
+      cleanup() {}
+    };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = input?.timeoutMs ?? 0;
+  const timeoutId = setTimeout(() => {
+    controller.abort(createAbortError("Request timed out", "TimeoutError"));
+  }, timeoutMs);
+
+  const parentSignal = input?.signal;
+  const abortFromParent = () => {
+    controller.abort(parentSignal?.reason ?? createAbortError("Request aborted", "AbortError"));
+  };
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      abortFromParent();
+    } else {
+      parentSignal.addEventListener("abort", abortFromParent, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timeoutId);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    }
+  };
 }
 
 type HistoryTurn = {
@@ -62,6 +156,8 @@ export async function streamGeminiReply(input: {
   history: HistoryTurn[];
   userMessage: string;
   onToken: (token: string) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<string> {
   const model = getGeminiClient().getGenerativeModel({
     model: getChatModelName(),
@@ -78,7 +174,7 @@ export async function streamGeminiReply(input: {
         parts: [{ text: userPrompt }]
       }
     ]
-  });
+  }, toGeminiRequestOptions(input));
 
   let fullText = "";
   for await (const chunk of response.stream) {
@@ -94,7 +190,9 @@ export async function streamGeminiReply(input: {
   return fullText.trim();
 }
 
-export async function generateGeminiReply(input: GeminiChatInput): Promise<string> {
+export async function generateGeminiReply(
+  input: GeminiChatInput & GeminiRequestOptions
+): Promise<string> {
   const model = getGeminiClient().getGenerativeModel({
     model: getChatModelName(),
     systemInstruction: input.systemPrompt
@@ -110,12 +208,16 @@ export async function generateGeminiReply(input: GeminiChatInput): Promise<strin
         parts: [{ text: userPrompt }]
       }
     ]
-  });
+  }, toGeminiRequestOptions(input));
 
   return response.response.text().trim();
 }
 
-export async function generateGeminiText(prompt: string, systemPrompt?: string): Promise<string> {
+export async function generateGeminiText(
+  prompt: string,
+  systemPrompt?: string,
+  options?: GeminiRequestOptions
+): Promise<string> {
   const model = getGeminiClient().getGenerativeModel({
     model: getChatModelName(),
     ...(systemPrompt ? { systemInstruction: systemPrompt } : {})
@@ -123,27 +225,50 @@ export async function generateGeminiText(prompt: string, systemPrompt?: string):
 
   const response = await model.generateContent({
     contents: [{ role: "user", parts: [{ text: prompt }] }]
-  });
+  }, toGeminiRequestOptions(options));
 
   return response.response.text().trim();
 }
 
-export async function embedText(text: string): Promise<number[]> {
+export async function embedText(text: string, options?: GeminiRequestOptions): Promise<number[]> {
+  const cacheKey = normalizeCacheKey(text);
+  const cached = embeddingCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.values;
+  }
+
   assertEnvVars(["GEMINI_API_KEY"]);
   const apiKey = getEnv().GEMINI_API_KEY;
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${getEmbeddingModelName()}:embedContent?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        content: { role: "user", parts: [{ text }] },
-        outputDimensionality: 768
-      })
+  let response: Response;
+
+  const { signal, cleanup } = createFetchAbortSignal(options);
+
+  try {
+    response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${getEmbeddingModelName()}:embedContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: { role: "user", parts: [{ text }] },
+          outputDimensionality: 768
+        }),
+        signal
+      }
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error("Embedding request timed out");
     }
-  );
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Embedding request aborted");
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
 
   const json = (await response.json()) as {
     embedding?: { values?: number[] };
@@ -153,6 +278,13 @@ export async function embedText(text: string): Promise<number[]> {
   if (!response.ok || !json.embedding?.values) {
     throw new Error(json.error?.message || "Embedding request failed");
   }
+
+  pruneExpiredEntries(embeddingCache);
+  embeddingCache.set(cacheKey, {
+    values: json.embedding.values,
+    expiresAt: Date.now() + EMBEDDING_CACHE_TTL_MS
+  });
+  trimCache(embeddingCache, EMBEDDING_CACHE_MAX_ENTRIES);
 
   return json.embedding.values;
 }

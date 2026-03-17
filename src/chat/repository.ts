@@ -97,13 +97,23 @@ export async function listChatMessages(chatId: string): Promise<ChatMessage[]> {
   return (data ?? []) as ChatMessage[];
 }
 
-export async function listRecentMessages(chatId: string, limit = 12): Promise<ChatMessage[]> {
-  const { data, error } = await supabaseAdmin
+export async function listRecentMessages(
+  chatId: string,
+  limit = 12,
+  options?: { signal?: AbortSignal }
+): Promise<ChatMessage[]> {
+  const query = supabaseAdmin
     .from("messages")
     .select("*")
     .eq("chat_id", chatId)
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  if (options?.signal) {
+    query.abortSignal(options.signal);
+  }
+
+  const { data, error } = await query;
 
   if (error) {
     throw new HttpError(500, `Failed to load recent messages: ${error.message}`);

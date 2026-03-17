@@ -6,7 +6,7 @@ import {
   listRecentMessages,
   touchChatThread
 } from "@/chat/repository";
-import type { ChatMessage, MessageIntent, MessageMetadata } from "@/chat/types";
+import type { ChatMessage, ChatThread, MessageIntent, MessageMetadata } from "@/chat/types";
 import { chatStreamInputSchema } from "@/chat/schemas";
 import { insertOpeningMessage } from "@/chat/opening";
 import { formatFlightDealsMessage, buildCallCtaMetadata } from "@/flight/format";
@@ -46,8 +46,97 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+const HISTORY_LOAD_TIMEOUT_MS = 3000;
+const KNOWLEDGE_RETRIEVAL_TIMEOUT_MS = 8000;
+const LLM_STREAM_TIMEOUT_MS = 18000;
+const LLM_FALLBACK_TIMEOUT_MS = 10000;
+
 function isFlightStateActive(state: FlightSearchState | null) {
   return Boolean(state && state.status !== "done" && state.status !== "completed");
+}
+
+async function withTimeout<T>(
+  factory: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, ms);
+
+  try {
+    return await factory(controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`${label} timed out after ${ms}ms`);
+      timeoutError.name = "TimeoutError";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isSimpleGreeting(message: string) {
+  const normalized = message.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  return [
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening"
+  ].includes(normalized);
+}
+
+function isSimpleGratitude(message: string) {
+  const normalized = message.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  return ["thanks", "thank you", "thx"].includes(normalized);
+}
+
+function isBusinessInfoIntent(message: string) {
+  const normalized = message.trim().toLowerCase();
+  return /(about(\s+the)?\s+(company|business|website)|about us|who are you|what do you do|company info|business info)/.test(
+    normalized
+  );
+}
+
+function buildGreetingReply(input: {
+  enabledServices: TravelService[];
+  callCta: CallCta;
+  message: string;
+}): { text: string; metadata: MessageMetadata } {
+  const isGratitude = isSimpleGratitude(input.message);
+  const text = isGratitude
+    ? "You're welcome. I can help with travel planning or support questions whenever you're ready."
+    : "Hello. I can help with travel planning, flight deals, and website support. What would you like to do?";
+
+  return {
+    text,
+    metadata: {
+      call_cta: input.callCta,
+      quick_replies: buildServicesQuickReplies(input.enabledServices)
+    }
+  };
+}
+
+function buildBusinessDescriptionReply(input: {
+  tenantName: string;
+  businessDescription: string;
+  enabledServices: TravelService[];
+  callCta: CallCta;
+}) {
+  const serviceLabel =
+    input.enabledServices.length > 0 ? ` We help with ${input.enabledServices.join(", ")}.` : "";
+  return {
+    text: `${input.tenantName} is ${input.businessDescription}.${serviceLabel}`.trim(),
+    metadata: {
+      call_cta: input.callCta,
+      quick_replies: buildServicesQuickReplies(input.enabledServices)
+    } as MessageMetadata
+  };
 }
 
 function buildPaymentSupportMessage(callCta: CallCta) {
@@ -71,10 +160,14 @@ function buildNoKnowledgeMessage(callCta: CallCta) {
   };
 }
 
-async function ensureChatId(input: { chatId?: string; tenantId: string; deviceId: string; message: string }) {
+async function ensureChatThread(input: {
+  chatId?: string;
+  tenantId: string;
+  deviceId: string;
+  message: string;
+}): Promise<ChatThread> {
   if (input.chatId) {
-    await assertChatOwnership(input.chatId, input.tenantId, input.deviceId);
-    return input.chatId;
+    return assertChatOwnership(input.chatId, input.tenantId, input.deviceId);
   }
 
   const chat = await createChatThread({
@@ -84,7 +177,7 @@ async function ensureChatId(input: { chatId?: string; tenantId: string; deviceId
   });
   await insertOpeningMessage(chat.id, input.tenantId);
 
-  return chat.id;
+  return chat;
 }
 
 async function produceFlightReply(input: {
@@ -393,21 +486,22 @@ export async function POST(request: Request) {
       );
     }
 
-    const chatId = await ensureChatId({
+    const thread = await ensureChatThread({
       chatId: input.chat_id,
       tenantId: input.tenant_id,
       deviceId: input.device_id,
       message: input.message
     });
+    const chatId = thread.id;
 
     const currentFlightState = await getFlightState(chatId);
-    const requestIntent: MessageIntent = detectPaymentIntent(input.message)
+    const requestIntent: MessageIntent = isSimpleGreeting(input.message) || isSimpleGratitude(input.message)
+      ? "greeting"
+      : detectPaymentIntent(input.message)
       ? "payment_support"
       : detectFlightIntent(input.message) || isFlightStateActive(currentFlightState)
         ? "flight_search"
         : "knowledge";
-
-    const thread = await assertChatOwnership(chatId, input.tenant_id, input.device_id);
 
     await insertChatMessage({
       chat_id: chatId,
@@ -451,22 +545,55 @@ export async function POST(request: Request) {
           assistantText = payment.text;
           assistantMetadata = payment.metadata;
           streamTextInChunks(assistantText, writer.token);
+        } else if (requestIntent === "greeting") {
+          assistantIntent = "greeting";
+          const greeting = buildGreetingReply({
+            enabledServices: tenant.supported_services,
+            callCta,
+            message: input.message
+          });
+          assistantText = greeting.text;
+          assistantMetadata = greeting.metadata;
+          streamTextInChunks(assistantText, writer.token);
         } else {
           assistantIntent = "knowledge";
+          if (tenant.business_description && isBusinessInfoIntent(input.message)) {
+            const company = buildBusinessDescriptionReply({
+              tenantName: tenant.name?.trim() || tenant.bot_name,
+              businessDescription: tenant.business_description,
+              enabledServices: tenant.supported_services,
+              callCta
+            });
+            assistantText = company.text;
+            assistantMetadata = company.metadata;
+            streamTextInChunks(assistantText, writer.token);
+          } else {
           let retrievedContext = "";
           let sourceUrls: string[] = [];
           let history: Array<{ role: "user" | "assistant"; content: string }> = [];
 
           const [retrievalResult, recentMessagesResult] = await Promise.allSettled([
-            retrieveKnowledge({
-              tenantId: input.tenant_id,
-              query: input.message,
-              matchCount: 5,
-              maxChunks: 4,
-              maxContextChars: 2800,
-              minSimilarity: 0.45
-            }),
-            listRecentMessages(chatId, 8)
+            withTimeout(
+              (signal) =>
+                retrieveKnowledge({
+                  tenantId: input.tenant_id,
+                  query: input.message,
+                  matchCount: 4,
+                  maxChunks: 3,
+                  maxContextChars: 2200,
+                  minSimilarity: 0.45,
+                  signal
+                }),
+              KNOWLEDGE_RETRIEVAL_TIMEOUT_MS,
+              "Knowledge retrieval"
+            ),
+            input.chat_id
+              ? withTimeout(
+                  (signal) => listRecentMessages(chatId, 6, { signal }),
+                  HISTORY_LOAD_TIMEOUT_MS,
+                  "Chat history load"
+                )
+              : Promise.resolve([] as ChatMessage[])
           ]);
 
           if (retrievalResult.status === "fulfilled") {
@@ -507,74 +634,106 @@ export async function POST(request: Request) {
             ...(retrievedContext ? {} : { no_rag_match: true })
           };
 
-          try {
-            assistantText = await streamGeminiReply({
-              systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
-              retrievedContext: [
-                retrievedContext || "No relevant support context was found for this request.",
-                `Support call number: ${callCta.number}`,
-                `Support tel link: ${callCta.tel}`
-              ].join("\n"),
-              pageContext: input.page_context,
-              history,
-              userMessage: input.message,
-              onToken: (token) => writer.token(token)
-            });
-
-            if (!assistantText) {
-              const fallback = buildNoKnowledgeMessage(callCta);
-              assistantText = fallback.text;
-              assistantMetadata = {
-                ...(assistantMetadata ?? {}),
-                ...fallback.metadata
-              };
-              streamTextInChunks(assistantText, writer.token);
-            }
-          } catch (error) {
-            logError("llm_generation_failed", {
-              request_id: requestId,
-              chat_id: chatId,
-              tenant_id: input.tenant_id,
-              error: error instanceof Error ? error.message : String(error)
-            });
-
-            const ragUserPrompt = buildRagUserPrompt({
-              retrievedContext:
-                retrievedContext || "No relevant support context was found for this request.",
-              callNumber: callCta.number,
-              callTel: callCta.tel,
-              userMessage: input.message,
-              pageContext: input.page_context
-            });
-
+          if (!retrievedContext) {
+            const fallback = buildNoKnowledgeMessage(callCta);
+            assistantText = fallback.text;
+            assistantMetadata = {
+              ...(assistantMetadata ?? {}),
+              ...fallback.metadata
+            };
+            streamTextInChunks(assistantText, writer.token);
+          } else {
+            let allowStreamingTokens = true;
             try {
-              assistantText = await generateGeminiText(
-                ragUserPrompt,
-                `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`
+              assistantText = await withTimeout(
+                (signal) =>
+                  streamGeminiReply({
+                    systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
+                    retrievedContext: [
+                      retrievedContext,
+                      `Support call number: ${callCta.number}`,
+                      `Support tel link: ${callCta.tel}`
+                    ].join("\n"),
+                    pageContext: input.page_context,
+                    history,
+                    userMessage: input.message,
+                    signal,
+                    timeoutMs: LLM_STREAM_TIMEOUT_MS,
+                    onToken: (token) => {
+                      if (allowStreamingTokens) {
+                        writer.token(token);
+                      }
+                    }
+                  }),
+                LLM_STREAM_TIMEOUT_MS,
+                "LLM stream"
               );
 
               if (!assistantText) {
-                throw new Error("LLM non-stream fallback returned empty text");
+                const fallback = buildNoKnowledgeMessage(callCta);
+                assistantText = fallback.text;
+                assistantMetadata = {
+                  ...(assistantMetadata ?? {}),
+                  ...fallback.metadata
+                };
+                streamTextInChunks(assistantText, writer.token);
               }
-
-              streamTextInChunks(assistantText, writer.token);
-            } catch (fallbackError) {
-              logError("llm_generation_fallback_failed", {
+            } catch (error) {
+              allowStreamingTokens = false;
+              logError("llm_generation_failed", {
                 request_id: requestId,
                 chat_id: chatId,
                 tenant_id: input.tenant_id,
-                error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                error: error instanceof Error ? error.message : String(error)
               });
 
-              assistantText =
-                `I'm unable to access support responses right now. ` +
-                `Please try again shortly, or connect at [${callCta.number}](${callCta.tel}).`;
-              assistantMetadata = {
-                call_cta: callCta
-              };
-              streamTextInChunks(assistantText, writer.token);
+              const ragUserPrompt = buildRagUserPrompt({
+                retrievedContext,
+                callNumber: callCta.number,
+                callTel: callCta.tel,
+                userMessage: input.message,
+                pageContext: input.page_context
+              });
+
+              try {
+                assistantText = await withTimeout(
+                  (signal) =>
+                    generateGeminiText(
+                      ragUserPrompt,
+                      `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
+                      {
+                        signal,
+                        timeoutMs: LLM_FALLBACK_TIMEOUT_MS
+                      }
+                    ),
+                  LLM_FALLBACK_TIMEOUT_MS,
+                  "LLM fallback"
+                );
+
+                if (!assistantText) {
+                  throw new Error("LLM non-stream fallback returned empty text");
+                }
+
+                streamTextInChunks(assistantText, writer.token);
+              } catch (fallbackError) {
+                logError("llm_generation_fallback_failed", {
+                  request_id: requestId,
+                  chat_id: chatId,
+                  tenant_id: input.tenant_id,
+                  error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                });
+
+                assistantText =
+                  `I'm unable to access support responses right now. ` +
+                  `Please try again shortly, or connect at [${callCta.number}](${callCta.tel}).`;
+                assistantMetadata = {
+                  call_cta: callCta
+                };
+                streamTextInChunks(assistantText, writer.token);
+              }
             }
           }
+        }
         }
 
         if (!assistantText) {

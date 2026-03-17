@@ -23,21 +23,32 @@ export function createSSEStream(
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      let closed = false;
+      function enqueue(event: string, data: unknown) {
+        if (closed) {
+          return;
+        }
+
+        controller.enqueue(encoder.encode(encodeSSE(event, data)));
+      }
+
       const writer = {
         token(token: string) {
-          controller.enqueue(encoder.encode(encodeSSE("token", token)));
+          enqueue("token", token);
         },
         done(payload: Record<string, unknown>) {
-          controller.enqueue(encoder.encode(encodeSSE("done", payload)));
+          enqueue("done", payload);
         },
         error(message: string) {
-          controller.enqueue(encoder.encode(encodeSSE("error", { message })));
+          enqueue("error", { message });
         }
       };
 
       try {
+        enqueue("ready", { ts: Date.now() });
         await handler(writer);
       } finally {
+        closed = true;
         controller.close();
       }
     }

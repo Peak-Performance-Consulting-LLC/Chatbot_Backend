@@ -14,11 +14,13 @@ export function getBaseCorsHeaders(request: Request) {
 
   let allowOrigin = "*";
   if (shouldRestrictOrigin && normalizedRequestOrigin) {
-    allowOrigin = env.allowedOrigins.includes(normalizedRequestOrigin)
+    allowOrigin = env.allowedOrigins.length === 0
       ? normalizedRequestOrigin
-      : env.allowedOrigins[0] || "";
+      : env.allowedOrigins.includes(normalizedRequestOrigin)
+        ? normalizedRequestOrigin
+        : env.allowedOrigins[0] || "";
   } else if (shouldRestrictOrigin) {
-    allowOrigin = env.allowedOrigins[0] || "";
+    allowOrigin = env.allowedOrigins[0] || requestOrigin || "*";
   }
 
   return {
