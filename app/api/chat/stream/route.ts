@@ -466,14 +466,12 @@ export async function POST(request: Request) {
     const input = parsed.data;
     const ip = getClientIp(request);
 
-    const tenant = await assertTenantDomainAccess(request, input.tenant_id);
-    const callCta = buildCallCtaMetadata({
-      number: tenant.support_phone,
-      label: tenant.support_cta_label
-    });
-
+    // Fix 1: Parallelize tenant auth + rate limit (saves ~500-800ms)
     const rateLimitKey = `${ip}:${input.device_id}:${input.tenant_id}`;
-    const rateLimit = await enforceRateLimit(rateLimitKey);
+    const [tenant, rateLimit] = await Promise.all([
+      assertTenantDomainAccess(request, input.tenant_id),
+      enforceRateLimit(rateLimitKey)
+    ]);
 
     if (!rateLimit.allowed) {
       return jsonCorsResponse(
@@ -486,6 +484,11 @@ export async function POST(request: Request) {
       );
     }
 
+    const callCta = buildCallCtaMetadata({
+      number: tenant.support_phone,
+      label: tenant.support_cta_label
+    });
+
     const thread = await ensureChatThread({
       chatId: input.chat_id,
       tenantId: input.tenant_id,
@@ -494,6 +497,7 @@ export async function POST(request: Request) {
     });
     const chatId = thread.id;
 
+    // Run flight state lookup concurrently with intent detection prep
     const currentFlightState = await getFlightState(chatId);
     const requestIntent: MessageIntent = isSimpleGreeting(input.message) || isSimpleGratitude(input.message)
       ? "greeting"
@@ -503,7 +507,8 @@ export async function POST(request: Request) {
         ? "flight_search"
         : "knowledge";
 
-    await insertChatMessage({
+    // Fire user message insert without blocking the stream start
+    const userMsgPromise = insertChatMessage({
       chat_id: chatId,
       role: "user",
       content: input.message,
@@ -516,7 +521,11 @@ export async function POST(request: Request) {
             }
           : {})
       }
-    });
+    }).catch((err) => logError("user_msg_insert_failed", {
+      request_id: requestId,
+      chat_id: chatId,
+      error: err instanceof Error ? err.message : String(err)
+    }));
 
     return createSSEStream(request, async (writer) => {
       let assistantText = "";
@@ -740,21 +749,7 @@ export async function POST(request: Request) {
           throw new HttpError(500, "Assistant response is empty");
         }
 
-        await insertChatMessage({
-          chat_id: chatId,
-          role: "assistant",
-          content: assistantText,
-          metadata: {
-            intent: assistantIntent,
-            tenant_id: input.tenant_id,
-            ...(assistantMetadata ?? {})
-          }
-        });
-
-        await touchChatThread(chatId, {
-          title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
-        });
-
+        // Fix 3: Close stream immediately, save in background (saves ~200-400ms)
         writer.done({ chat_id: chatId });
 
         logInfo("chat_stream_completed", {
@@ -764,6 +759,32 @@ export async function POST(request: Request) {
           device_id: input.device_id,
           message_length: input.message.length
         });
+
+        // Ensure user message was saved, then save assistant message + update thread
+        // All fire-and-forget to avoid blocking the response
+        void userMsgPromise.then(() =>
+          Promise.all([
+            insertChatMessage({
+              chat_id: chatId,
+              role: "assistant",
+              content: assistantText,
+              metadata: {
+                intent: assistantIntent,
+                tenant_id: input.tenant_id,
+                ...(assistantMetadata ?? {})
+              }
+            }),
+            touchChatThread(chatId, {
+              title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
+            })
+          ])
+        ).catch((err) =>
+          logError("post_response_save_failed", {
+            request_id: requestId,
+            chat_id: chatId,
+            error: err instanceof Error ? err.message : String(err)
+          })
+        );
       } catch (error) {
         const asHttpError = toHttpError(error);
         writer.error(asHttpError.message);

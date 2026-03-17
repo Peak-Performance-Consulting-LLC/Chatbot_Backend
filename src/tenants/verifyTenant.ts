@@ -29,6 +29,34 @@ type TenantRow = {
   bot_avatar_url: string | null;
 };
 
+const TENANT_CACHE_TTL_MS = 5 * 60 * 1000;
+const TENANT_CACHE_MAX_ENTRIES = 100;
+const tenantCache = new Map<string, { data: TenantRow; expiresAt: number }>();
+const verificationCache = new Map<string, { verified: boolean; expiresAt: number }>();
+
+function pruneTenantCache() {
+  const now = Date.now();
+  for (const [key, value] of tenantCache.entries()) {
+    if (value.expiresAt <= now) tenantCache.delete(key);
+  }
+  for (const [key, value] of verificationCache.entries()) {
+    if (value.expiresAt <= now) verificationCache.delete(key);
+  }
+}
+
+function trimTenantCache() {
+  while (tenantCache.size > TENANT_CACHE_MAX_ENTRIES) {
+    const oldest = tenantCache.keys().next().value;
+    if (!oldest) break;
+    tenantCache.delete(oldest);
+  }
+  while (verificationCache.size > TENANT_CACHE_MAX_ENTRIES) {
+    const oldest = verificationCache.keys().next().value;
+    if (!oldest) break;
+    verificationCache.delete(oldest);
+  }
+}
+
 const defaultServices = ["flights"] as const;
 
 function normalizeSupportedServices(input: unknown): Array<"flights" | "hotels" | "cars" | "cruises"> {
@@ -91,6 +119,11 @@ function getClaimedSiteHost(request: Request): string | null {
 }
 
 export async function getTenantById(tenantId: string): Promise<TenantRow> {
+  const cached = tenantCache.get(tenantId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("tenants")
     .select(
@@ -146,7 +179,7 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     bot_avatar_url?: string | null;
   };
 
-  return {
+  const result: TenantRow = {
     tenant_id: row.tenant_id,
     name: row.name,
     allowed_domains: row.allowed_domains,
@@ -173,10 +206,21 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     welcome_message: row.welcome_message?.trim() || "Welcome. How can I help today?",
     bot_name: row.bot_name?.trim() || "AeroConcierge",
     bot_avatar_url: row.bot_avatar_url?.trim() || null
-  };
+  } as TenantRow;
+
+  pruneTenantCache();
+  tenantCache.set(tenantId, { data: result, expiresAt: Date.now() + TENANT_CACHE_TTL_MS });
+  trimTenantCache();
+
+  return result;
 }
 
 async function isTenantDomainVerified(tenantId: string): Promise<boolean> {
+  const cachedVerification = verificationCache.get(tenantId);
+  if (cachedVerification && cachedVerification.expiresAt > Date.now()) {
+    return cachedVerification.verified;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("tenant_domain_verifications")
     .select("status")
@@ -203,7 +247,12 @@ async function isTenantDomainVerified(tenantId: string): Promise<boolean> {
     return false;
   }
 
-  return (data as { status?: string }).status === "verified";
+  const verified = (data as { status?: string }).status === "verified";
+
+  verificationCache.set(tenantId, { verified, expiresAt: Date.now() + TENANT_CACHE_TTL_MS });
+  trimTenantCache();
+
+  return verified;
 }
 
 async function allowPortalPreviewAccess(request: Request, tenantId: string): Promise<boolean> {

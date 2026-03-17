@@ -9,8 +9,8 @@ type MatchRow = {
   similarity: number;
 };
 
-const RETRIEVAL_CACHE_TTL_MS = 3 * 60 * 1000;
-const RETRIEVAL_CACHE_MAX_ENTRIES = 150;
+const RETRIEVAL_CACHE_TTL_MS = 10 * 60 * 1000;
+const RETRIEVAL_CACHE_MAX_ENTRIES = 400;
 const retrievalCache = new Map<
   string,
   {

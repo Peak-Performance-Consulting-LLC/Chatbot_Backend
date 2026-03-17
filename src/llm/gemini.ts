@@ -2,8 +2,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { assertEnvVars, getEnv } from "@/config/env";
 
 let genAI: GoogleGenerativeAI | null = null;
-const EMBEDDING_CACHE_TTL_MS = 10 * 60 * 1000;
-const EMBEDDING_CACHE_MAX_ENTRIES = 200;
+const EMBEDDING_CACHE_TTL_MS = 30 * 60 * 1000;
+const EMBEDDING_CACHE_MAX_ENTRIES = 500;
 const embeddingCache = new Map<string, { values: number[]; expiresAt: number }>();
 
 type GeminiRequestOptions = {
