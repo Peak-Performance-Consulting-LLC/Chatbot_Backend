@@ -13,6 +13,9 @@ export async function retrieveKnowledge(input: {
   tenantId: string;
   query: string;
   matchCount?: number;
+  maxChunks?: number;
+  maxContextChars?: number;
+  minSimilarity?: number;
 }): Promise<{ contextText: string; chunks: MatchRow[]; sourceUrls: string[] }> {
   const embedding = await embedText(input.query);
 
@@ -27,16 +30,49 @@ export async function retrieveKnowledge(input: {
   }
 
   const chunks = (data ?? []) as MatchRow[];
+  const maxChunks = input.maxChunks ?? 4;
+  const maxContextChars = input.maxContextChars ?? 2800;
+  const minSimilarity = input.minSimilarity ?? 0;
 
-  const contextText = chunks
+  const selected: MatchRow[] = [];
+  let usedChars = 0;
+
+  for (const chunk of chunks) {
+    if (selected.length >= maxChunks) {
+      break;
+    }
+
+    if (chunk.similarity < minSimilarity) {
+      continue;
+    }
+
+    const normalizedText = chunk.chunk_text.replace(/\s+/g, " ").trim();
+    const remaining = maxContextChars - usedChars;
+    if (!normalizedText || remaining <= 40) {
+      break;
+    }
+
+    const excerpt =
+      normalizedText.length <= remaining
+        ? normalizedText
+        : `${normalizedText.slice(0, Math.max(remaining - 3, 0)).trimEnd()}...`;
+
+    selected.push({
+      ...chunk,
+      chunk_text: excerpt
+    });
+    usedChars += excerpt.length;
+  }
+
+  const contextText = selected
     .map((chunk, index) => `[Chunk ${index + 1}] ${chunk.chunk_text}`)
     .join("\n\n");
 
-  const sourceUrls = Array.from(new Set(chunks.map((chunk) => chunk.source_url).filter(Boolean))) as string[];
+  const sourceUrls = Array.from(new Set(selected.map((chunk) => chunk.source_url).filter(Boolean))) as string[];
 
   return {
     contextText,
-    chunks,
+    chunks: selected,
     sourceUrls
   };
 }

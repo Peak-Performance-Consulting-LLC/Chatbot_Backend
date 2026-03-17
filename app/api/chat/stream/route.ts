@@ -3,11 +3,9 @@ import {
   assertChatOwnership,
   createChatThread,
   insertChatMessage,
-  listChatMessages,
   listRecentMessages,
   touchChatThread
 } from "@/chat/repository";
-import { maybeSummarizeConversation } from "@/chat/summary";
 import type { ChatMessage, MessageIntent, MessageMetadata } from "@/chat/types";
 import { chatStreamInputSchema } from "@/chat/schemas";
 import { insertOpeningMessage } from "@/chat/opening";
@@ -457,17 +455,24 @@ export async function POST(request: Request) {
           assistantIntent = "knowledge";
           let retrievedContext = "";
           let sourceUrls: string[] = [];
+          let history: Array<{ role: "user" | "assistant"; content: string }> = [];
 
-          try {
-            const retrieval = await retrieveKnowledge({
+          const [retrievalResult, recentMessagesResult] = await Promise.allSettled([
+            retrieveKnowledge({
               tenantId: input.tenant_id,
               query: input.message,
-              matchCount: 7
-            });
+              matchCount: 5,
+              maxChunks: 4,
+              maxContextChars: 2800,
+              minSimilarity: 0.45
+            }),
+            listRecentMessages(chatId, 8)
+          ]);
 
-            retrievedContext = retrieval.contextText.trim();
-            sourceUrls = retrieval.sourceUrls;
-          } catch (error) {
+          if (retrievalResult.status === "fulfilled") {
+            retrievedContext = retrievalResult.value.contextText.trim();
+            sourceUrls = retrievalResult.value.sourceUrls;
+          } else {
             retrievedContext = "";
             sourceUrls = [];
 
@@ -475,7 +480,24 @@ export async function POST(request: Request) {
               request_id: requestId,
               chat_id: chatId,
               tenant_id: input.tenant_id,
-              error: error instanceof Error ? error.message : String(error)
+              error:
+                retrievalResult.reason instanceof Error
+                  ? retrievalResult.reason.message
+                  : String(retrievalResult.reason)
+            });
+          }
+
+          if (recentMessagesResult.status === "fulfilled") {
+            history = toHistory(recentMessagesResult.value).slice(0, -1);
+          } else {
+            logError("chat_history_load_failed", {
+              request_id: requestId,
+              chat_id: chatId,
+              tenant_id: input.tenant_id,
+              error:
+                recentMessagesResult.reason instanceof Error
+                  ? recentMessagesResult.reason.message
+                  : String(recentMessagesResult.reason)
             });
           }
 
@@ -486,9 +508,6 @@ export async function POST(request: Request) {
           };
 
           try {
-            const recentMessages = await listRecentMessages(chatId, 14);
-            const history = toHistory(recentMessages).slice(0, -1);
-
             assistantText = await streamGeminiReply({
               systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
               retrievedContext: [
@@ -573,12 +592,8 @@ export async function POST(request: Request) {
           }
         });
 
-        const allMessages = await listChatMessages(chatId);
-        const summary = await maybeSummarizeConversation(allMessages).catch(() => null);
-
         await touchChatThread(chatId, {
-          title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined,
-          summary: summary ?? undefined
+          title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
         });
 
         writer.done({ chat_id: chatId });
