@@ -75,12 +75,13 @@ export function buildWidgetConfig(input: {
   const script = `<script>
 (function () {
   var widgetOrigin = '${escapeAttribute(widgetOrigin)}';
-  var expandedWidth = '${input.businessProfile.window_width}px';
-  var expandedHeight = '${expandedHeight}px';
-  var peekWidth = '${peekWidth}px';
-  var peekHeight = '${peekHeight}px';
-  var launcherSize = '${launcherSize}px';
-  var expandedRadius = '${input.businessProfile.border_radius}px';
+  var desktopExpandedWidth = ${input.businessProfile.window_width};
+  var desktopExpandedHeight = ${expandedHeight};
+  var desktopPeekWidth = ${peekWidth};
+  var desktopPeekHeight = ${peekHeight};
+  var desktopLauncherSize = ${launcherSize};
+  var desktopExpandedRadius = ${input.businessProfile.border_radius};
+  var activeMode = 'peek';
   var iframe = document.createElement('iframe');
   iframe.src = '${escapeAttribute(embedUrl)}';
   iframe.title = '${escapeAttribute(input.businessProfile.bot_name)} Chat';
@@ -99,28 +100,64 @@ export function buildWidgetConfig(input: {
   iframe.allow = 'clipboard-write';
   iframe.setAttribute('scrolling', 'no');
 
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function isCompactViewport() {
+    return window.innerWidth <= 640 || window.innerHeight <= 760;
+  }
+
+  function resolveSizing() {
+    if (!isCompactViewport()) {
+      return {
+        expandedWidth: desktopExpandedWidth,
+        expandedHeight: desktopExpandedHeight,
+        peekWidth: desktopPeekWidth,
+        peekHeight: desktopPeekHeight,
+        launcherSize: desktopLauncherSize,
+        expandedRadius: desktopExpandedRadius
+      };
+    }
+
+    return {
+      expandedWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 24), 296, 356),
+      expandedHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 118), 460, 620),
+      peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 24), 280, 312),
+      peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 140), 280, 320),
+      launcherSize: 64,
+      expandedRadius: Math.min(desktopExpandedRadius, 18)
+    };
+  }
+
   function applyState(mode) {
+    activeMode = mode;
+    var sizing = resolveSizing();
+
     if (mode === 'open') {
-      iframe.style.width = expandedWidth;
-      iframe.style.height = expandedHeight;
-      iframe.style.borderRadius = expandedRadius;
+      iframe.style.width = sizing.expandedWidth + 'px';
+      iframe.style.height = sizing.expandedHeight + 'px';
+      iframe.style.borderRadius = sizing.expandedRadius + 'px';
       return;
     }
 
     if (mode === 'launcher') {
-      iframe.style.width = launcherSize;
-      iframe.style.height = launcherSize;
+      iframe.style.width = sizing.launcherSize + 'px';
+      iframe.style.height = sizing.launcherSize + 'px';
       iframe.style.borderRadius = '999px';
       return;
     }
 
-    iframe.style.width = peekWidth;
-    iframe.style.height = peekHeight;
+    iframe.style.width = sizing.peekWidth + 'px';
+    iframe.style.height = sizing.peekHeight + 'px';
     iframe.style.borderRadius = '0';
   }
 
   applyState('peek');
   document.body.appendChild(iframe);
+  window.addEventListener('resize', function () {
+    applyState(activeMode);
+  });
 
   window.addEventListener('message', function (event) {
     if (!event || event.origin !== widgetOrigin) return;
