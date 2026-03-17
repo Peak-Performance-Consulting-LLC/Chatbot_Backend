@@ -643,11 +643,35 @@ export async function replaceTenantSourcesForUser(input: {
 }) {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
+
+  // Fetch the tenant's current knowledge state before overwriting sources
+  const currentTenant = await getOwnedTenantSummary(user.id, input.tenant_id);
+  const currentKbStatus = currentTenant.knowledge_base?.status ?? "pending";
+
   await replaceTenantSources(input.tenant_id, input.sources);
+
+  // If ingestion has already completed successfully, preserve the status as ready/warning
+  // so the dashboard doesn't incorrectly show "pending" after the user edits sources.
+  // Only mark "pending" if the KB was never indexed (still in its initial pending state).
+  let nextStatus: "pending" | "warning";
+  let nextMessage: string;
+
+  if (currentKbStatus === "ready" || currentKbStatus === "warning") {
+    // Keep it as warning so users know sources changed but KB is still functional
+    nextStatus = "warning";
+    nextMessage = "Sources updated — re-run indexing to apply the latest changes to your chatbot.";
+  } else {
+    nextStatus = "pending";
+    nextMessage = "Sources saved. Run indexing to refresh the chatbot knowledge base with the latest content.";
+  }
+
   const knowledge = await updateTenantKnowledgeState(input.tenant_id, {
-    status: "pending",
-    message: "Sources saved. Run indexing to refresh the chatbot knowledge base with the latest content.",
-    last_ingested_at: null
+    status: nextStatus,
+    message: nextMessage,
+    // Preserve last_ingested_at if KB was previously ready
+    last_ingested_at: currentKbStatus === "ready" || currentKbStatus === "warning"
+      ? currentTenant.knowledge_base?.last_ingested_at ?? null
+      : null
   });
   const sources = await listTenantSources(input.tenant_id);
 
@@ -657,3 +681,4 @@ export async function replaceTenantSourcesForUser(input: {
     knowledge_base: knowledge
   };
 }
+
