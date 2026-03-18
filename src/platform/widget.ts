@@ -54,6 +54,8 @@ export function buildWidgetConfig(input: {
   var widgetOrigin = '${escapeAttribute(widgetOrigin)}';
   var layout = {
     widgetPosition: 'right',
+    launcherStyle: 'rounded',
+    botName: 'Chat with us',
     windowWidth: 380,
     windowHeight: 640,
     borderRadius: 18
@@ -91,10 +93,20 @@ export function buildWidgetConfig(input: {
   function resolveSizing() {
     var desktopExpandedWidth = clamp(layout.windowWidth, 320, 560);
     var desktopExpandedHeight = clamp(layout.windowHeight + 78, 520, 938);
-    var desktopPeekWidth = clamp(Math.min(layout.windowWidth, 360), 320, 360);
+    var desktopPeekWidth = clamp(Math.min(layout.windowWidth, 376), 320, 376);
     var desktopPeekHeight = 344;
-    var desktopLauncherSize = 76;
     var desktopExpandedRadius = clamp(layout.borderRadius, 8, 36);
+    var label = (layout.botName || 'Chat with us').trim();
+    var desktopLauncherWidth = clamp(124 + clamp(label.length, 6, 24) * 7, 190, 284);
+    var desktopLauncherHeight = layout.launcherStyle === 'minimal' ? 60 : 68;
+    var desktopLauncherRadius =
+      layout.launcherStyle === 'square'
+        ? 20
+        : layout.launcherStyle === 'minimal'
+          ? 16
+          : layout.launcherStyle === 'pill'
+            ? 999
+            : 24;
 
     if (!isCompactViewport()) {
       return {
@@ -102,7 +114,9 @@ export function buildWidgetConfig(input: {
         expandedHeight: desktopExpandedHeight,
         peekWidth: desktopPeekWidth,
         peekHeight: desktopPeekHeight,
-        launcherSize: desktopLauncherSize,
+        launcherWidth: desktopLauncherWidth,
+        launcherHeight: desktopLauncherHeight,
+        launcherRadius: desktopLauncherRadius,
         expandedRadius: desktopExpandedRadius
       };
     }
@@ -112,9 +126,18 @@ export function buildWidgetConfig(input: {
       expandedHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 164), 440, 560),
       compactWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 36), 296, 340),
       compactHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 260), 340, 430),
-      peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 40), 260, 296),
+      peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 40), 272, 320),
       peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 220), 220, 284),
-      launcherSize: 58,
+      launcherWidth: clamp(Math.min(desktopLauncherWidth, window.innerWidth - 36), 176, 236),
+      launcherHeight: layout.launcherStyle === 'minimal' ? 54 : 58,
+      launcherRadius:
+        layout.launcherStyle === 'square'
+          ? 18
+          : layout.launcherStyle === 'minimal'
+            ? 14
+            : layout.launcherStyle === 'pill'
+              ? 999
+              : 20,
       expandedRadius: Math.min(desktopExpandedRadius, 20)
     };
   }
@@ -139,9 +162,9 @@ export function buildWidgetConfig(input: {
     }
 
     if (mode === 'launcher') {
-      iframe.style.width = sizing.launcherSize + 'px';
-      iframe.style.height = sizing.launcherSize + 'px';
-      iframe.style.borderRadius = '999px';
+      iframe.style.width = sizing.launcherWidth + 'px';
+      iframe.style.height = sizing.launcherHeight + 'px';
+      iframe.style.borderRadius = sizing.launcherRadius + 'px';
       return;
     }
 
@@ -164,6 +187,17 @@ export function buildWidgetConfig(input: {
       var nextLayout = event.data.layout || {};
       if (nextLayout.widgetPosition === 'left' || nextLayout.widgetPosition === 'right') {
         layout.widgetPosition = nextLayout.widgetPosition;
+      }
+      if (
+        nextLayout.launcherStyle === 'rounded' ||
+        nextLayout.launcherStyle === 'pill' ||
+        nextLayout.launcherStyle === 'square' ||
+        nextLayout.launcherStyle === 'minimal'
+      ) {
+        layout.launcherStyle = nextLayout.launcherStyle;
+      }
+      if (typeof nextLayout.botName === 'string' && nextLayout.botName.trim()) {
+        layout.botName = nextLayout.botName.trim().slice(0, 42);
       }
       if (typeof nextLayout.windowWidth === 'number' && isFinite(nextLayout.windowWidth)) {
         layout.windowWidth = clamp(Math.round(nextLayout.windowWidth), 320, 560);
