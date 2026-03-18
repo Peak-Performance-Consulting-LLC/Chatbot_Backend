@@ -56,8 +56,8 @@ export function buildWidgetConfig(input: {
     widgetPosition: 'right',
     launcherStyle: 'rounded',
     botName: 'Chat with us',
-    windowWidth: 380,
-    windowHeight: 640,
+    windowWidth: 520,
+    windowHeight: 760,
     borderRadius: 18
   };
   var activeMode = 'launcher';
