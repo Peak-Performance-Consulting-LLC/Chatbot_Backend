@@ -17,6 +17,7 @@ const envSchema = z.object({
   UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
   PLATFORM_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
   PLATFORM_AUTO_INGEST_ON_SIGNUP: z.string().optional(),
+  PLATFORM_AUTO_INGEST_ON_SOURCE_UPDATE: z.string().optional(),
   WIDGET_HOST_URL: z.string().default("http://localhost:5173"),
   BACKEND_PUBLIC_URL: z.string().default("http://localhost:4000"),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),

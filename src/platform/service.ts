@@ -97,6 +97,15 @@ function shouldAutoIngestOnSignup(): boolean {
   return true;
 }
 
+function shouldAutoIngestOnSourceUpdate(): boolean {
+  const configured = getEnv().PLATFORM_AUTO_INGEST_ON_SOURCE_UPDATE?.trim().toLowerCase();
+  if (configured === "false" || configured === "0" || configured === "no") {
+    return false;
+  }
+
+  return true;
+}
+
 function summarizeIngestion(result: {
   inserted_chunks: number;
   fetched_documents: number;
@@ -168,7 +177,13 @@ async function getOwnedTenantSummary(userId: string, tenantId: string) {
   return tenant;
 }
 
-async function runProvisioningIngest(input: { tenantId: string; sources: TenantSourceInput[] }) {
+async function runProvisioningIngest(input: {
+  tenantId: string;
+  sources: TenantSourceInput[];
+  shouldAutoIngest?: boolean;
+  processingMessage?: string;
+  pendingMessage?: string;
+}) {
   if (input.sources.length === 0) {
     await updateTenantKnowledgeState(input.tenantId, {
       status: "pending",
@@ -185,10 +200,10 @@ async function runProvisioningIngest(input: { tenantId: string; sources: TenantS
     };
   }
 
-  if (!shouldAutoIngestOnSignup()) {
+  if (!(input.shouldAutoIngest ?? shouldAutoIngestOnSignup())) {
     await updateTenantKnowledgeState(input.tenantId, {
       status: "pending",
-      message: "Knowledge sources were saved. Start indexing to make the chatbot ready.",
+      message: input.pendingMessage ?? "Knowledge sources were saved. Start indexing to make the chatbot ready.",
       last_ingested_at: null
     });
 
@@ -203,7 +218,9 @@ async function runProvisioningIngest(input: { tenantId: string; sources: TenantS
 
   await updateTenantKnowledgeState(input.tenantId, {
     status: "processing",
-    message: "Scanning your website and sitemap to build the chatbot knowledge base.",
+    message:
+      input.processingMessage ??
+      "Reading sitemap URLs, child sitemaps, pages, docs, and policies to build tenant knowledge chunks.",
     last_ingested_at: null
   });
 
@@ -662,40 +679,28 @@ export async function replaceTenantSourcesForUser(input: {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
 
-  // Fetch the tenant's current knowledge state before overwriting sources
-  const currentTenant = await getOwnedTenantSummary(user.id, input.tenant_id);
-  const currentKbStatus = currentTenant.knowledge_base?.status ?? "pending";
-
   await replaceTenantSources(input.tenant_id, input.sources);
+  const normalizedSources = input.sources.map((source) => ({
+    source_type: source.source_type,
+    source_value: source.source_value
+  })) as TenantSourceInput[];
 
-  // If ingestion has already completed successfully, preserve the status as ready/warning
-  // so the dashboard doesn't incorrectly show "pending" after the user edits sources.
-  // Only mark "pending" if the KB was never indexed (still in its initial pending state).
-  let nextStatus: "pending" | "warning";
-  let nextMessage: string;
-
-  if (currentKbStatus === "ready" || currentKbStatus === "warning") {
-    // Keep it as warning so users know sources changed but KB is still functional
-    nextStatus = "warning";
-    nextMessage = "Sources updated — re-run indexing to apply the latest changes to your chatbot.";
-  } else {
-    nextStatus = "pending";
-    nextMessage = "Sources saved. Run indexing to refresh the chatbot knowledge base with the latest content.";
-  }
-
-  const knowledge = await updateTenantKnowledgeState(input.tenant_id, {
-    status: nextStatus,
-    message: nextMessage,
-    // Preserve last_ingested_at if KB was previously ready
-    last_ingested_at: currentKbStatus === "ready" || currentKbStatus === "warning"
-      ? currentTenant.knowledge_base?.last_ingested_at ?? null
-      : null
+  const ingestion = await runProvisioningIngest({
+    tenantId: input.tenant_id,
+    sources: normalizedSources,
+    shouldAutoIngest: shouldAutoIngestOnSourceUpdate(),
+    processingMessage:
+      "Updating your knowledge base from sitemap URLs, child sitemaps, docs, support pages, and pasted policies.",
+    pendingMessage: "Sources saved. Start indexing to refresh the chatbot knowledge base with the latest content."
   });
+
+  const tenant = await getOwnedTenantSummary(user.id, input.tenant_id);
   const sources = await listTenantSources(input.tenant_id);
 
   return {
     tenant_id: input.tenant_id,
     sources,
-    knowledge_base: knowledge
+    knowledge_base: tenant.knowledge_base,
+    ingestion
   };
 }

@@ -1,6 +1,5 @@
-import fs from "fs";
-import path from "path";
-import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
+import { loadLocalEnv } from "./envLoader";
+import type { TenantSourceInput } from "@/rag/ingest";
 
 type CliArgs = {
   tenant_id?: string;
@@ -22,40 +21,6 @@ function parseArgs(argv: string[]): CliArgs {
     acc[rawKey as keyof CliArgs] = rawValue.join("=") || "true";
     return acc;
   }, {});
-}
-
-function loadEnvFromLocalFile() {
-  const envPath = path.resolve(process.cwd(), ".env.local");
-  if (!fs.existsSync(envPath)) {
-    return;
-  }
-
-  const content = fs.readFileSync(envPath, "utf8");
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-
-    const index = line.indexOf("=");
-    if (index === -1) {
-      continue;
-    }
-
-    const key = line.slice(0, index).trim();
-    if (!key || process.env[key] !== undefined) {
-      continue;
-    }
-
-    const rawValue = line.slice(index + 1).trim();
-    const value =
-      (rawValue.startsWith("\"") && rawValue.endsWith("\"")) ||
-      (rawValue.startsWith("'") && rawValue.endsWith("'"))
-        ? rawValue.slice(1, -1)
-        : rawValue;
-
-    process.env[key] = value;
-  }
 }
 
 function buildSources(args: CliArgs): TenantSourceInput[] {
@@ -88,8 +53,9 @@ function buildSources(args: CliArgs): TenantSourceInput[] {
 }
 
 async function main() {
-  loadEnvFromLocalFile();
+  loadLocalEnv();
   const args = parseArgs(process.argv.slice(2));
+  const { ingestKnowledgeForTenant } = await import("@/rag/ingest");
 
   if (!args.tenant_id?.trim()) {
     throw new Error("Missing --tenant_id=...");
@@ -124,4 +90,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
-
