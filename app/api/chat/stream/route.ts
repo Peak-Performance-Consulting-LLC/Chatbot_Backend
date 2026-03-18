@@ -749,21 +749,12 @@ export async function POST(request: Request) {
           throw new HttpError(500, "Assistant response is empty");
         }
 
-        // Fix 3: Close stream immediately, save in background (saves ~200-400ms)
-        writer.done({ chat_id: chatId });
+        // Persist both sides of the exchange before signaling completion so the
+        // follow-up message sync cannot overwrite the streamed reply with stale data.
+        await userMsgPromise;
 
-        logInfo("chat_stream_completed", {
-          request_id: requestId,
-          chat_id: chatId,
-          tenant_id: input.tenant_id,
-          device_id: input.device_id,
-          message_length: input.message.length
-        });
-
-        // Ensure user message was saved, then save assistant message + update thread
-        // All fire-and-forget to avoid blocking the response
-        void userMsgPromise.then(() =>
-          Promise.all([
+        try {
+          await Promise.all([
             insertChatMessage({
               chat_id: chatId,
               role: "assistant",
@@ -777,14 +768,24 @@ export async function POST(request: Request) {
             touchChatThread(chatId, {
               title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
             })
-          ])
-        ).catch((err) =>
+          ]);
+        } catch (err) {
           logError("post_response_save_failed", {
             request_id: requestId,
             chat_id: chatId,
             error: err instanceof Error ? err.message : String(err)
-          })
-        );
+          });
+        }
+
+        writer.done({ chat_id: chatId });
+
+        logInfo("chat_stream_completed", {
+          request_id: requestId,
+          chat_id: chatId,
+          tenant_id: input.tenant_id,
+          device_id: input.device_id,
+          message_length: input.message.length
+        });
       } catch (error) {
         const asHttpError = toHttpError(error);
         writer.error(asHttpError.message);
