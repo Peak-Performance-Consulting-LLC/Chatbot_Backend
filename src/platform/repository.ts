@@ -422,6 +422,8 @@ function normalizeBusinessProfile(
   const headerCtaLabel = input?.header_cta_label?.trim();
   const headerCtaNotice = input?.header_cta_notice?.trim();
   const botName = input?.bot_name?.trim();
+  const normalizedHeaderCtaLabel =
+    headerCtaLabel && headerCtaLabel.toLowerCase() !== "new" ? headerCtaLabel : "";
 
   return {
     business_type: input?.business_type?.trim() || "general_travel",
@@ -429,7 +431,7 @@ function normalizeBusinessProfile(
     support_phone: normalizeOptionalText(input?.support_phone),
     support_email: normalizeOptionalText(input?.support_email),
     support_cta_label: supportCtaLabel || "Connect with a specialist",
-    header_cta_label: headerCtaLabel || "New",
+    header_cta_label: normalizedHeaderCtaLabel,
     header_cta_notice: headerCtaNotice || "Hi! I am your AI assistant. Ask me anything about your trip.",
     business_description: normalizeOptionalText(input?.business_description),
     primary_color: normalizeHexColor(input?.primary_color, defaultPalette.primary_color),

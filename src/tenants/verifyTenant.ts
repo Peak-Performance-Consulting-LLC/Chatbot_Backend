@@ -233,7 +233,10 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     support_phone: row.support_phone?.trim() || null,
     support_email: row.support_email?.trim() || null,
     support_cta_label: row.support_cta_label?.trim() || "Connect with a specialist",
-    header_cta_label: row.header_cta_label?.trim() || "New",
+    header_cta_label:
+      row.header_cta_label?.trim() && row.header_cta_label.trim().toLowerCase() !== "new"
+        ? row.header_cta_label.trim()
+        : "",
     header_cta_notice: row.header_cta_notice?.trim() || "Hi! I am your AI assistant. Ask me anything about your trip.",
     business_description: row.business_description?.trim() || null,
     primary_color: row.primary_color?.trim() || "#006d77",
