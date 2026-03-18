@@ -44,50 +44,25 @@ export function buildWidgetConfig(input: {
   const params = new URLSearchParams({
     embed: "1",
     tenant_id: input.tenantId,
-    backend_url: backendUrl,
-    bot_name: input.businessProfile.bot_name,
-    welcome_message: input.businessProfile.welcome_message,
-    primary_color: input.businessProfile.primary_color,
-    user_bubble_color: input.businessProfile.user_bubble_color,
-    bot_bubble_color: input.businessProfile.bot_bubble_color,
-    font_family: input.businessProfile.font_family,
-    widget_position: input.businessProfile.widget_position,
-    launcher_style: input.businessProfile.launcher_style,
-    window_width: String(input.businessProfile.window_width),
-    window_height: String(input.businessProfile.window_height),
-    border_radius: String(input.businessProfile.border_radius),
-    support_phone: input.businessProfile.support_phone || "",
-    support_cta_label: input.businessProfile.support_cta_label || "",
-    header_cta_label: input.businessProfile.header_cta_label,
-    header_cta_notice: input.businessProfile.header_cta_notice,
-    avatar_url: input.businessProfile.bot_avatar_url || ""
+    backend_url: backendUrl
   });
-
   const embedUrl = `${widgetHostUrl}/?${params.toString()}`;
-  const iframeRight = input.businessProfile.widget_position === "left" ? "auto" : "16px";
-  const iframeLeft = input.businessProfile.widget_position === "left" ? "16px" : "auto";
   const widgetOrigin = new URL(widgetHostUrl).origin;
-  const peekWidth = Math.min(360, Math.max(320, input.businessProfile.window_width));
-  const peekHeight = 344;
-  const launcherSize = 76;
-  const expandedHeight = input.businessProfile.window_height + 78;
 
   const script = `<script>
 (function () {
   var widgetOrigin = '${escapeAttribute(widgetOrigin)}';
-  var desktopExpandedWidth = ${input.businessProfile.window_width};
-  var desktopExpandedHeight = ${expandedHeight};
-  var desktopPeekWidth = ${peekWidth};
-  var desktopPeekHeight = ${peekHeight};
-  var desktopLauncherSize = ${launcherSize};
-  var desktopExpandedRadius = ${input.businessProfile.border_radius};
-  var activeMode = 'peek';
+  var layout = {
+    widgetPosition: 'right',
+    windowWidth: 380,
+    windowHeight: 640,
+    borderRadius: 18
+  };
+  var activeMode = 'launcher';
   var iframe = document.createElement('iframe');
   iframe.src = '${escapeAttribute(embedUrl)}';
-  iframe.title = '${escapeAttribute(input.businessProfile.bot_name)} Chat';
+  iframe.title = 'Chat widget';
   iframe.style.position = 'fixed';
-  iframe.style.right = '${iframeRight}';
-  iframe.style.left = '${iframeLeft}';
   iframe.style.bottom = '16px';
   iframe.style.maxWidth = 'calc(100vw - 24px)';
   iframe.style.maxHeight = 'calc(100vh - 24px)';
@@ -108,7 +83,19 @@ export function buildWidgetConfig(input: {
     return window.innerWidth <= 640 || window.innerHeight <= 760;
   }
 
+  function applyPosition() {
+    iframe.style.right = layout.widgetPosition === 'left' ? 'auto' : '16px';
+    iframe.style.left = layout.widgetPosition === 'left' ? '16px' : 'auto';
+  }
+
   function resolveSizing() {
+    var desktopExpandedWidth = clamp(layout.windowWidth, 320, 560);
+    var desktopExpandedHeight = clamp(layout.windowHeight + 78, 520, 938);
+    var desktopPeekWidth = clamp(Math.min(layout.windowWidth, 360), 320, 360);
+    var desktopPeekHeight = 344;
+    var desktopLauncherSize = 76;
+    var desktopExpandedRadius = clamp(layout.borderRadius, 8, 36);
+
     if (!isCompactViewport()) {
       return {
         expandedWidth: desktopExpandedWidth,
@@ -134,6 +121,7 @@ export function buildWidgetConfig(input: {
 
   function applyState(mode) {
     activeMode = mode;
+    applyPosition();
     var sizing = resolveSizing();
 
     if (mode === 'open') {
@@ -162,7 +150,7 @@ export function buildWidgetConfig(input: {
     iframe.style.borderRadius = '0';
   }
 
-  applyState('peek');
+  applyState('launcher');
   document.body.appendChild(iframe);
   window.addEventListener('resize', function () {
     applyState(activeMode);
@@ -171,32 +159,35 @@ export function buildWidgetConfig(input: {
   window.addEventListener('message', function (event) {
     if (!event || event.origin !== widgetOrigin) return;
     if (event.source !== iframe.contentWindow) return;
-    if (!event.data || event.data.type !== 'aeroconcierge:widget-state') return;
+    if (!event.data) return;
+    if (event.data.type === 'aeroconcierge:widget-layout') {
+      var nextLayout = event.data.layout || {};
+      if (nextLayout.widgetPosition === 'left' || nextLayout.widgetPosition === 'right') {
+        layout.widgetPosition = nextLayout.widgetPosition;
+      }
+      if (typeof nextLayout.windowWidth === 'number' && isFinite(nextLayout.windowWidth)) {
+        layout.windowWidth = clamp(Math.round(nextLayout.windowWidth), 320, 560);
+      }
+      if (typeof nextLayout.windowHeight === 'number' && isFinite(nextLayout.windowHeight)) {
+        layout.windowHeight = clamp(Math.round(nextLayout.windowHeight), 520, 860);
+      }
+      if (typeof nextLayout.borderRadius === 'number' && isFinite(nextLayout.borderRadius)) {
+        layout.borderRadius = clamp(Math.round(nextLayout.borderRadius), 8, 36);
+      }
+      applyState(activeMode);
+      return;
+    }
+    if (event.data.type !== 'aeroconcierge:widget-state') return;
     var nextMode = event.data.mode;
     if (nextMode !== 'open' && nextMode !== 'open-compact' && nextMode !== 'peek' && nextMode !== 'launcher') {
-      nextMode = event.data.open ? 'open' : 'peek';
+      nextMode = event.data.open ? 'open' : 'launcher';
     }
     applyState(nextMode);
   });
 })();
 </script>`;
 
-  const appearance = {
-    primaryColor: input.businessProfile.primary_color,
-    userBubbleColor: input.businessProfile.user_bubble_color,
-    botBubbleColor: input.businessProfile.bot_bubble_color,
-    fontFamily: input.businessProfile.font_family,
-    widgetPosition: input.businessProfile.widget_position,
-    launcherStyle: input.businessProfile.launcher_style,
-    windowWidth: input.businessProfile.window_width,
-    windowHeight: input.businessProfile.window_height,
-    borderRadius: input.businessProfile.border_radius,
-    botName: input.businessProfile.bot_name,
-    welcomeMessage: input.businessProfile.welcome_message,
-    botAvatarUrl: input.businessProfile.bot_avatar_url || undefined
-  };
-
-  const reactSnippet = `<ChatWidget tenantId="${input.tenantId}" backendUrl="${backendUrl}" supportPhoneOverride={${JSON.stringify(input.businessProfile.support_phone || "")}} supportCtaLabelOverride={${JSON.stringify(input.businessProfile.support_cta_label)}} headerCtaLabelOverride={${JSON.stringify(input.businessProfile.header_cta_label)}} headerCtaNoticeOverride={${JSON.stringify(input.businessProfile.header_cta_notice)}} appearanceOverride={${JSON.stringify(appearance, null, 2)}} />`;
+  const reactSnippet = `<ChatWidget tenantId="${input.tenantId}" backendUrl="${backendUrl}" />`;
 
   return {
     tenant_id: input.tenantId,

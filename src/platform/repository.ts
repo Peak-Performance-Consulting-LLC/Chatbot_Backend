@@ -30,12 +30,21 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column tenants.font_family does not exist") ||
     message.includes("column tenants.widget_position does not exist") ||
     message.includes("column tenants.launcher_style does not exist") ||
+    message.includes("column tenants.theme_style does not exist") ||
+    message.includes("column tenants.bg_pattern does not exist") ||
+    message.includes("column tenants.launcher_icon does not exist") ||
     message.includes("column tenants.window_width does not exist") ||
     message.includes("column tenants.window_height does not exist") ||
     message.includes("column tenants.border_radius does not exist") ||
     message.includes("column tenants.welcome_message does not exist") ||
     message.includes("column tenants.bot_name does not exist") ||
     message.includes("column tenants.bot_avatar_url does not exist") ||
+    message.includes("column tenants.quick_replies does not exist") ||
+    message.includes("column tenants.ai_tone does not exist") ||
+    message.includes("column tenants.notif_enabled does not exist") ||
+    message.includes("column tenants.notif_text does not exist") ||
+    message.includes("column tenants.notif_animation does not exist") ||
+    message.includes("column tenants.notif_chips does not exist") ||
     message.includes("column tenants.header_cta_label does not exist") ||
     message.includes("column tenants.header_cta_notice does not exist") ||
     message.includes("column tenant_domain_verifications.last_checked_at does not exist") ||
@@ -75,6 +84,11 @@ export type DomainVerificationStatus = "pending" | "txt_not_found" | "txt_mismat
 export type KnowledgeBaseStatus = "pending" | "processing" | "ready" | "warning" | "error";
 export type WidgetPosition = "left" | "right";
 export type LauncherStyle = "rounded" | "pill" | "square" | "minimal";
+export type ThemeStyle = "standard" | "glass" | "clay" | "dark" | "minimal";
+export type BgPattern = "none" | "dots" | "grid" | "waves";
+export type LauncherIcon = "chat" | "sparkle" | "headset" | "zap" | "heart";
+export type AiTone = "friendly" | "professional" | "concise" | "enthusiastic";
+export type NotifAnimation = "bounce" | "pulse" | "slide";
 
 type DomainVerificationRow = {
   tenant_id: string;
@@ -115,12 +129,21 @@ export type TenantBusinessProfile = {
   font_family: string;
   widget_position: WidgetPosition;
   launcher_style: LauncherStyle;
+  theme_style: ThemeStyle;
+  bg_pattern: BgPattern;
+  launcher_icon: LauncherIcon;
   window_width: number;
   window_height: number;
   border_radius: number;
   welcome_message: string;
   bot_name: string;
   bot_avatar_url: string | null;
+  quick_replies: string[];
+  ai_tone: AiTone;
+  notif_enabled: boolean;
+  notif_text: string;
+  notif_animation: NotifAnimation;
+  notif_chips: string[];
 };
 
 export type TenantKnowledgeState = {
@@ -152,6 +175,8 @@ const defaultPalette = {
   user_bubble_color: "#006d77",
   bot_bubble_color: "#edf6f9"
 } as const;
+const defaultQuickReplies = ["How does this work?", "Pricing plans", "Get support"] as const;
+const defaultNotifChips = ["I have a question", "Tell me more"] as const;
 
 export type PlatformSession = {
   token: string;
@@ -239,6 +264,46 @@ function normalizeLauncherStyle(input: string | null | undefined): LauncherStyle
   return "rounded";
 }
 
+function normalizeThemeStyle(input: string | null | undefined): ThemeStyle {
+  const value = input?.trim().toLowerCase();
+  if (value === "glass" || value === "clay" || value === "dark" || value === "minimal") {
+    return value;
+  }
+  return "standard";
+}
+
+function normalizeBgPattern(input: string | null | undefined): BgPattern {
+  const value = input?.trim().toLowerCase();
+  if (value === "dots" || value === "grid" || value === "waves") {
+    return value;
+  }
+  return "none";
+}
+
+function normalizeLauncherIcon(input: string | null | undefined): LauncherIcon {
+  const value = input?.trim().toLowerCase();
+  if (value === "sparkle" || value === "headset" || value === "zap" || value === "heart") {
+    return value;
+  }
+  return "chat";
+}
+
+function normalizeAiTone(input: string | null | undefined): AiTone {
+  const value = input?.trim().toLowerCase();
+  if (value === "professional" || value === "concise" || value === "enthusiastic") {
+    return value;
+  }
+  return "friendly";
+}
+
+function normalizeNotifAnimation(input: string | null | undefined): NotifAnimation {
+  const value = input?.trim().toLowerCase();
+  if (value === "pulse" || value === "slide") {
+    return value;
+  }
+  return "bounce";
+}
+
 function normalizeNumber(input: number | string | null | undefined, fallback: number, min: number, max: number): number {
   const value = typeof input === "string" ? Number(input) : input;
   if (!Number.isFinite(value)) {
@@ -264,6 +329,34 @@ function normalizeOptionalUrl(input: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeStringList(
+  input: string[] | null | undefined,
+  fallback: readonly string[],
+  maxItems: number,
+  maxLength: number
+): string[] {
+  if (!Array.isArray(input)) {
+    return [...fallback];
+  }
+  if (input.length === 0) {
+    return [];
+  }
+
+  const values = new Set<string>();
+  for (const item of input) {
+    const normalized = String(item).trim();
+    if (!normalized) {
+      continue;
+    }
+    values.add(normalized.slice(0, maxLength));
+    if (values.size >= maxItems) {
+      break;
+    }
+  }
+
+  return values.size > 0 ? Array.from(values) : [...fallback];
 }
 
 export function normalizeDomain(input: string): string {
@@ -345,6 +438,9 @@ function normalizeBusinessProfile(
     font_family: normalizeFontFamily(input?.font_family),
     widget_position: normalizeWidgetPosition(input?.widget_position),
     launcher_style: normalizeLauncherStyle(input?.launcher_style),
+    theme_style: normalizeThemeStyle(input?.theme_style),
+    bg_pattern: normalizeBgPattern(input?.bg_pattern),
+    launcher_icon: normalizeLauncherIcon(input?.launcher_icon),
     window_width: normalizeNumber(input?.window_width, 380, 320, 520),
     window_height: normalizeNumber(input?.window_height, 640, 520, 860),
     border_radius: normalizeNumber(input?.border_radius, 18, 8, 36),
@@ -352,7 +448,13 @@ function normalizeBusinessProfile(
       input?.welcome_message?.trim() ||
       buildDefaultWelcomeMessage(defaults?.companyName, supported),
     bot_name: botName || "AeroConcierge",
-    bot_avatar_url: normalizeOptionalUrl(input?.bot_avatar_url)
+    bot_avatar_url: normalizeOptionalUrl(input?.bot_avatar_url),
+    quick_replies: normalizeStringList(input?.quick_replies, defaultQuickReplies, 6, 60),
+    ai_tone: normalizeAiTone(input?.ai_tone),
+    notif_enabled: input?.notif_enabled ?? true,
+    notif_text: input?.notif_text?.trim() || "👋 Need help?",
+    notif_animation: normalizeNotifAnimation(input?.notif_animation),
+    notif_chips: normalizeStringList(input?.notif_chips, defaultNotifChips, 4, 40)
   };
 }
 
@@ -623,19 +725,28 @@ export async function createTenantForUser(input: {
     font_family: businessProfile.font_family,
     widget_position: businessProfile.widget_position,
     launcher_style: businessProfile.launcher_style,
+    theme_style: businessProfile.theme_style,
+    bg_pattern: businessProfile.bg_pattern,
+    launcher_icon: businessProfile.launcher_icon,
     window_width: businessProfile.window_width,
     window_height: businessProfile.window_height,
     border_radius: businessProfile.border_radius,
     welcome_message: businessProfile.welcome_message,
     bot_name: businessProfile.bot_name,
-    bot_avatar_url: businessProfile.bot_avatar_url
+    bot_avatar_url: businessProfile.bot_avatar_url,
+    quick_replies: businessProfile.quick_replies,
+    ai_tone: businessProfile.ai_tone,
+    notif_enabled: businessProfile.notif_enabled,
+    notif_text: businessProfile.notif_text,
+    notif_animation: businessProfile.notif_animation,
+    notif_chips: businessProfile.notif_chips
   };
 
   const { data: tenant, error: tenantError } = await supabaseAdmin
     .from("tenants")
     .insert(tenantPayload)
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
     )
     .single();
 
@@ -672,12 +783,21 @@ export async function createTenantForUser(input: {
     font_family: string | null;
     widget_position: string | null;
     launcher_style: string | null;
+    theme_style: string | null;
+    bg_pattern: string | null;
+    launcher_icon: string | null;
     window_width: number | null;
     window_height: number | null;
     border_radius: number | null;
     welcome_message: string | null;
     bot_name: string | null;
     bot_avatar_url: string | null;
+    quick_replies: string[] | null;
+    ai_tone: string | null;
+    notif_enabled: boolean | null;
+    notif_text: string | null;
+    notif_animation: string | null;
+    notif_chips: string[] | null;
   };
 
   return {
@@ -700,12 +820,21 @@ export async function createTenantForUser(input: {
         font_family: tenantRow.font_family || undefined,
         widget_position: tenantRow.widget_position as WidgetPosition | undefined,
         launcher_style: tenantRow.launcher_style as LauncherStyle | undefined,
+        theme_style: tenantRow.theme_style as ThemeStyle | undefined,
+        bg_pattern: tenantRow.bg_pattern as BgPattern | undefined,
+        launcher_icon: tenantRow.launcher_icon as LauncherIcon | undefined,
         window_width: tenantRow.window_width || undefined,
         window_height: tenantRow.window_height || undefined,
         border_radius: tenantRow.border_radius || undefined,
         welcome_message: tenantRow.welcome_message || undefined,
         bot_name: tenantRow.bot_name || undefined,
-        bot_avatar_url: tenantRow.bot_avatar_url || undefined
+        bot_avatar_url: tenantRow.bot_avatar_url || undefined,
+        quick_replies: tenantRow.quick_replies || undefined,
+        ai_tone: tenantRow.ai_tone as AiTone | undefined,
+        notif_enabled: tenantRow.notif_enabled ?? undefined,
+        notif_text: tenantRow.notif_text || undefined,
+        notif_animation: tenantRow.notif_animation as NotifAnimation | undefined,
+        notif_chips: tenantRow.notif_chips || undefined
       },
       { companyName: tenantRow.name }
     )
@@ -919,7 +1048,7 @@ export async function updateTenantBusinessProfile(
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "name, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "name, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
     )
     .eq("tenant_id", tenantId)
     .maybeSingle();
@@ -948,12 +1077,21 @@ export async function updateTenantBusinessProfile(
     font_family: string | null;
     widget_position: string | null;
     launcher_style: string | null;
+    theme_style: string | null;
+    bg_pattern: string | null;
+    launcher_icon: string | null;
     window_width: number | null;
     window_height: number | null;
     border_radius: number | null;
     welcome_message: string | null;
     bot_name: string | null;
     bot_avatar_url: string | null;
+    quick_replies: string[] | null;
+    ai_tone: string | null;
+    notif_enabled: boolean | null;
+    notif_text: string | null;
+    notif_animation: string | null;
+    notif_chips: string[] | null;
   };
 
   const next = normalizeBusinessProfile(
@@ -975,12 +1113,21 @@ export async function updateTenantBusinessProfile(
       font_family: patch.font_family ?? current.font_family ?? undefined,
       widget_position: (patch.widget_position ?? current.widget_position ?? undefined) as WidgetPosition | undefined,
       launcher_style: (patch.launcher_style ?? current.launcher_style ?? undefined) as LauncherStyle | undefined,
+      theme_style: (patch.theme_style ?? current.theme_style ?? undefined) as ThemeStyle | undefined,
+      bg_pattern: (patch.bg_pattern ?? current.bg_pattern ?? undefined) as BgPattern | undefined,
+      launcher_icon: (patch.launcher_icon ?? current.launcher_icon ?? undefined) as LauncherIcon | undefined,
       window_width: patch.window_width ?? current.window_width ?? undefined,
       window_height: patch.window_height ?? current.window_height ?? undefined,
       border_radius: patch.border_radius ?? current.border_radius ?? undefined,
       welcome_message: patch.welcome_message ?? current.welcome_message ?? undefined,
       bot_name: patch.bot_name ?? current.bot_name ?? undefined,
-      bot_avatar_url: patch.bot_avatar_url ?? current.bot_avatar_url ?? undefined
+      bot_avatar_url: patch.bot_avatar_url ?? current.bot_avatar_url ?? undefined,
+      quick_replies: patch.quick_replies ?? current.quick_replies ?? undefined,
+      ai_tone: (patch.ai_tone ?? current.ai_tone ?? undefined) as AiTone | undefined,
+      notif_enabled: patch.notif_enabled ?? current.notif_enabled ?? undefined,
+      notif_text: patch.notif_text ?? current.notif_text ?? undefined,
+      notif_animation: (patch.notif_animation ?? current.notif_animation ?? undefined) as NotifAnimation | undefined,
+      notif_chips: patch.notif_chips ?? current.notif_chips ?? undefined
     },
     { companyName: current.name }
   );
@@ -1002,12 +1149,21 @@ export async function updateTenantBusinessProfile(
       font_family: next.font_family,
       widget_position: next.widget_position,
       launcher_style: next.launcher_style,
+      theme_style: next.theme_style,
+      bg_pattern: next.bg_pattern,
+      launcher_icon: next.launcher_icon,
       window_width: next.window_width,
       window_height: next.window_height,
       border_radius: next.border_radius,
       welcome_message: next.welcome_message,
       bot_name: next.bot_name,
-      bot_avatar_url: next.bot_avatar_url
+      bot_avatar_url: next.bot_avatar_url,
+      quick_replies: next.quick_replies,
+      ai_tone: next.ai_tone,
+      notif_enabled: next.notif_enabled,
+      notif_text: next.notif_text,
+      notif_animation: next.notif_animation,
+      notif_chips: next.notif_chips
     })
     .eq("tenant_id", tenantId);
 
@@ -1036,7 +1192,7 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
   const { data: tenants, error: tenantsError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
     )
     .in("tenant_id", tenantIds);
 
@@ -1079,12 +1235,21 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     font_family: string | null;
     widget_position: string | null;
     launcher_style: string | null;
+    theme_style: string | null;
+    bg_pattern: string | null;
+    launcher_icon: string | null;
     window_width: number | null;
     window_height: number | null;
     border_radius: number | null;
     welcome_message: string | null;
     bot_name: string | null;
     bot_avatar_url: string | null;
+    quick_replies: string[] | null;
+    ai_tone: string | null;
+    notif_enabled: boolean | null;
+    notif_text: string | null;
+    notif_animation: string | null;
+    notif_chips: string[] | null;
   }>).map((tenant) => ({
     tenant_id: tenant.tenant_id,
     name: tenant.name,
@@ -1105,12 +1270,21 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
         font_family: tenant.font_family || undefined,
         widget_position: tenant.widget_position as WidgetPosition | undefined,
         launcher_style: tenant.launcher_style as LauncherStyle | undefined,
+        theme_style: tenant.theme_style as ThemeStyle | undefined,
+        bg_pattern: tenant.bg_pattern as BgPattern | undefined,
+        launcher_icon: tenant.launcher_icon as LauncherIcon | undefined,
         window_width: tenant.window_width || undefined,
         window_height: tenant.window_height || undefined,
         border_radius: tenant.border_radius || undefined,
         welcome_message: tenant.welcome_message || undefined,
         bot_name: tenant.bot_name || undefined,
-        bot_avatar_url: tenant.bot_avatar_url || undefined
+        bot_avatar_url: tenant.bot_avatar_url || undefined,
+        quick_replies: tenant.quick_replies || undefined,
+        ai_tone: tenant.ai_tone as AiTone | undefined,
+        notif_enabled: tenant.notif_enabled ?? undefined,
+        notif_text: tenant.notif_text || undefined,
+        notif_animation: tenant.notif_animation as NotifAnimation | undefined,
+        notif_chips: tenant.notif_chips || undefined
       },
       { companyName: tenant.name }
     ),

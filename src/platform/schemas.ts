@@ -13,6 +13,11 @@ const colorSchema = z.string().trim().regex(
 export const supportedServiceSchema = z.enum(["flights", "hotels", "cars", "cruises"]);
 export const widgetPositionSchema = z.enum(["left", "right"]);
 export const launcherStyleSchema = z.enum(["rounded", "pill", "square", "minimal"]);
+export const themeStyleSchema = z.enum(["standard", "glass", "clay", "dark", "minimal"]);
+export const bgPatternSchema = z.enum(["none", "dots", "grid", "waves"]);
+export const launcherIconSchema = z.enum(["chat", "sparkle", "headset", "zap", "heart"]);
+export const aiToneSchema = z.enum(["friendly", "professional", "concise", "enthusiastic"]);
+export const notifAnimationSchema = z.enum(["bounce", "pulse", "slide"]);
 
 export const platformSignupSchema = z.object({
   full_name: z.string().trim().min(2).max(120),
@@ -65,12 +70,21 @@ export const platformTenantProfileSchema = z.object({
   font_family: z.string().trim().min(2).max(80).optional(),
   widget_position: widgetPositionSchema.optional(),
   launcher_style: launcherStyleSchema.optional(),
+  theme_style: themeStyleSchema.optional(),
+  bg_pattern: bgPatternSchema.optional(),
+  launcher_icon: launcherIconSchema.optional(),
   window_width: z.number().int().min(320).max(520).optional(),
   window_height: z.number().int().min(520).max(860).optional(),
   border_radius: z.number().int().min(8).max(36).optional(),
   welcome_message: z.string().trim().min(8).max(320).optional(),
   bot_name: z.string().trim().min(2).max(80).optional(),
-  bot_avatar_url: optionalUrlSchema
+  bot_avatar_url: optionalUrlSchema,
+  quick_replies: z.array(z.string().trim().min(1).max(60)).max(6).optional(),
+  ai_tone: aiToneSchema.optional(),
+  notif_enabled: z.boolean().optional(),
+  notif_text: z.string().trim().min(1).max(60).optional(),
+  notif_animation: notifAnimationSchema.optional(),
+  notif_chips: z.array(z.string().trim().min(1).max(40)).max(4).optional()
 });
 
 export const platformTenantDomainSchema = z.object({

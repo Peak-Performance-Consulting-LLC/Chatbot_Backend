@@ -28,19 +28,33 @@ alter table public.tenants
   add column if not exists font_family text not null default 'Manrope',
   add column if not exists widget_position text not null default 'right',
   add column if not exists launcher_style text not null default 'rounded',
+  add column if not exists theme_style text not null default 'standard',
+  add column if not exists bg_pattern text not null default 'none',
+  add column if not exists launcher_icon text not null default 'chat',
   add column if not exists window_width integer not null default 380,
   add column if not exists window_height integer not null default 640,
   add column if not exists border_radius integer not null default 18,
   add column if not exists welcome_message text,
   add column if not exists bot_name text not null default 'AeroConcierge',
   add column if not exists bot_avatar_url text,
+  add column if not exists quick_replies text[] not null default array['How does this work?', 'Pricing plans', 'Get support']::text[],
+  add column if not exists ai_tone text not null default 'friendly',
+  add column if not exists notif_enabled boolean not null default true,
+  add column if not exists notif_text text not null default '👋 Need help?',
+  add column if not exists notif_animation text not null default 'bounce',
+  add column if not exists notif_chips text[] not null default array['I have a question', 'Tell me more']::text[],
   add column if not exists header_cta_label text not null default 'New',
   add column if not exists header_cta_notice text not null default 'Hi! I am your AI assistant. Ask me anything about your trip.';
 
 alter table public.tenants
   drop constraint if exists tenants_knowledge_status_check,
   drop constraint if exists tenants_widget_position_check,
-  drop constraint if exists tenants_launcher_style_check;
+  drop constraint if exists tenants_launcher_style_check,
+  drop constraint if exists tenants_theme_style_check,
+  drop constraint if exists tenants_bg_pattern_check,
+  drop constraint if exists tenants_launcher_icon_check,
+  drop constraint if exists tenants_ai_tone_check,
+  drop constraint if exists tenants_notif_animation_check;
 
 alter table public.tenants
   add constraint tenants_knowledge_status_check
@@ -48,7 +62,17 @@ alter table public.tenants
   add constraint tenants_widget_position_check
     check (widget_position in ('left', 'right')),
   add constraint tenants_launcher_style_check
-    check (launcher_style in ('rounded', 'pill', 'square', 'minimal'));
+    check (launcher_style in ('rounded', 'pill', 'square', 'minimal')),
+  add constraint tenants_theme_style_check
+    check (theme_style in ('standard', 'glass', 'clay', 'dark', 'minimal')),
+  add constraint tenants_bg_pattern_check
+    check (bg_pattern in ('none', 'dots', 'grid', 'waves')),
+  add constraint tenants_launcher_icon_check
+    check (launcher_icon in ('chat', 'sparkle', 'headset', 'zap', 'heart')),
+  add constraint tenants_ai_tone_check
+    check (ai_tone in ('friendly', 'professional', 'concise', 'enthusiastic')),
+  add constraint tenants_notif_animation_check
+    check (notif_animation in ('bounce', 'pulse', 'slide'));
 
 -- 3) Knowledge chunks (tenant-scoped embeddings)
 create table if not exists public.knowledge_chunks (

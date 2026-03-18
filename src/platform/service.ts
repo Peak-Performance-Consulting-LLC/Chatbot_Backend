@@ -423,12 +423,21 @@ export async function updatePlatformTenantProfile(input: {
   font_family?: string;
   widget_position?: "left" | "right";
   launcher_style?: "rounded" | "pill" | "square" | "minimal";
+  theme_style?: "standard" | "glass" | "clay" | "dark" | "minimal";
+  bg_pattern?: "none" | "dots" | "grid" | "waves";
+  launcher_icon?: "chat" | "sparkle" | "headset" | "zap" | "heart";
   window_width?: number;
   window_height?: number;
   border_radius?: number;
   welcome_message?: string;
   bot_name?: string;
   bot_avatar_url?: string;
+  quick_replies?: string[];
+  ai_tone?: "friendly" | "professional" | "concise" | "enthusiastic";
+  notif_enabled?: boolean;
+  notif_text?: string;
+  notif_animation?: "bounce" | "pulse" | "slide";
+  notif_chips?: string[];
 }) {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
@@ -448,12 +457,21 @@ export async function updatePlatformTenantProfile(input: {
     font_family: input.font_family,
     widget_position: input.widget_position,
     launcher_style: input.launcher_style,
+    theme_style: input.theme_style,
+    bg_pattern: input.bg_pattern,
+    launcher_icon: input.launcher_icon,
     window_width: input.window_width,
     window_height: input.window_height,
     border_radius: input.border_radius,
     welcome_message: input.welcome_message,
     bot_name: input.bot_name,
-    bot_avatar_url: input.bot_avatar_url
+    bot_avatar_url: input.bot_avatar_url,
+    quick_replies: input.quick_replies,
+    ai_tone: input.ai_tone,
+    notif_enabled: input.notif_enabled,
+    notif_text: input.notif_text,
+    notif_animation: input.notif_animation,
+    notif_chips: input.notif_chips
   } satisfies Partial<TenantBusinessProfile>);
 
   const tenant = await getOwnedTenantSummary(user.id, input.tenant_id);
@@ -681,4 +699,3 @@ export async function replaceTenantSourcesForUser(input: {
     knowledge_base: knowledge
   };
 }
-

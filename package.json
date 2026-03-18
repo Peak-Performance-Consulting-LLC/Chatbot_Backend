@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 4000",
-    "build": "next build",
-    "start": "next start -p 4000",
+    "dev": "node scripts/startDev.mjs",
+    "build": "rm -rf .next && next build",
+    "start": "next start -p 3000",
     "lint": "next lint",
     "typecheck": "rm -rf .next tsconfig.tsbuildinfo && tsc --noEmit",
     "doctor": "tsx scripts/doctor.ts",

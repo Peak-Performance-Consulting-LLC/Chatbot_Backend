@@ -46,12 +46,21 @@ export async function PATCH(request: Request) {
       font_family: parsed.data.font_family,
       widget_position: parsed.data.widget_position,
       launcher_style: parsed.data.launcher_style,
+      theme_style: parsed.data.theme_style,
+      bg_pattern: parsed.data.bg_pattern,
+      launcher_icon: parsed.data.launcher_icon,
       window_width: parsed.data.window_width,
       window_height: parsed.data.window_height,
       border_radius: parsed.data.border_radius,
       welcome_message: parsed.data.welcome_message,
       bot_name: parsed.data.bot_name,
-      bot_avatar_url: parsed.data.bot_avatar_url
+      bot_avatar_url: parsed.data.bot_avatar_url,
+      quick_replies: parsed.data.quick_replies,
+      ai_tone: parsed.data.ai_tone,
+      notif_enabled: parsed.data.notif_enabled,
+      notif_text: parsed.data.notif_text,
+      notif_animation: parsed.data.notif_animation,
+      notif_chips: parsed.data.notif_chips
     });
 
     // Immediately evict in-process cache so widget-config returns fresh values
