@@ -2,6 +2,7 @@ import { getEnv } from "@/config/env";
 import { HttpError } from "@/lib/httpError";
 import { supabaseAdmin } from "@/lib/supabase";
 import { createSessionToken, hashPassword, hashSessionToken, verifyPassword } from "@/platform/auth";
+import { clearTenantCache } from "@/tenants/verifyTenant";
 
 function isMissingTableErrorMessage(message: string): boolean {
   return (
@@ -1172,6 +1173,8 @@ export async function updateTenantBusinessProfile(
   if (error) {
     throwPlatformSchemaMissingError(`Failed to update tenant business profile: ${error.message}`);
   }
+
+  clearTenantCache(tenantId);
 
   return next;
 }
