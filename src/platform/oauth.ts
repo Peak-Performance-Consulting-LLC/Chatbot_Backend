@@ -21,6 +21,23 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/$/, "");
 }
 
+function normalizeHttpOrigin(input: string | null | undefined): string | null {
+  const trimmed = input?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    return trimTrailingSlash(url.origin);
+  } catch {
+    return null;
+  }
+}
+
 function getBackendPublicUrl(): string {
   const env = getEnv();
   return trimTrailingSlash(env.BACKEND_PUBLIC_URL || "http://localhost:3000");
@@ -29,6 +46,15 @@ function getBackendPublicUrl(): string {
 function getPlatformAppUrl(): string {
   const env = getEnv();
   return trimTrailingSlash(env.PLATFORM_APP_URL || env.WIDGET_HOST_URL || "http://localhost:5173");
+}
+
+function getAllowedPlatformAppOrigins(): Set<string> {
+  const env = getEnv();
+  return new Set(
+    [env.PLATFORM_APP_URL, env.WIDGET_HOST_URL, env.BACKEND_PUBLIC_URL, ...env.allowedOrigins]
+      .map((value) => normalizeHttpOrigin(value))
+      .filter((value): value is string => Boolean(value))
+  );
 }
 
 function getRedirectUri(provider: PlatformOauthProvider): string {
@@ -85,6 +111,15 @@ export function assertPlatformOauthProvider(value: string): PlatformOauthProvide
     return value;
   }
   throw new HttpError(404, "OAuth provider not supported");
+}
+
+export function resolvePlatformOauthAppUrl(input?: string | null): string | null {
+  const candidate = normalizeHttpOrigin(input);
+  if (!candidate) {
+    return null;
+  }
+
+  return getAllowedPlatformAppOrigins().has(candidate) ? candidate : null;
 }
 
 export function createPlatformOauthAuthorizationUrl(provider: PlatformOauthProvider, state: string): string {
@@ -259,8 +294,9 @@ export async function exchangePlatformOauthCode(
   return provider === "google" ? exchangeGoogleCode(trimmedCode) : exchangeFacebookCode(trimmedCode);
 }
 
-export function buildPlatformOauthReturnUrl(input: { token?: string; error?: string }): string {
-  const url = new URL("/platform/login", getPlatformAppUrl());
+export function buildPlatformOauthReturnUrl(input: { token?: string; error?: string; appUrl?: string | null }): string {
+  const appUrl = resolvePlatformOauthAppUrl(input.appUrl) ?? getPlatformAppUrl();
+  const url = new URL("/platform/login", appUrl);
 
   if (input.token) {
     url.searchParams.set("oauth_token", input.token);

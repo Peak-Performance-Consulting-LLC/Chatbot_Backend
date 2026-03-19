@@ -7,14 +7,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OAUTH_STATE_COOKIE = "platform_oauth_state";
+const OAUTH_APP_URL_COOKIE = "platform_oauth_app_url";
 
 function buildExpiredCookiePath(provider: string) {
   return `/api/platform/oauth/${provider}/callback`;
 }
 
-function clearOauthStateCookie(response: NextResponse, provider: string, secure: boolean) {
+function clearOauthCookie(response: NextResponse, name: string, provider: string, secure: boolean) {
   response.cookies.set({
-    name: OAUTH_STATE_COOKIE,
+    name,
     value: "",
     httpOnly: true,
     sameSite: "lax",
@@ -26,7 +27,8 @@ function clearOauthStateCookie(response: NextResponse, provider: string, secure:
 
 function buildRedirectResponse(url: string, provider: string, secure: boolean) {
   const response = NextResponse.redirect(url);
-  clearOauthStateCookie(response, provider, secure);
+  clearOauthCookie(response, OAUTH_STATE_COOKIE, provider, secure);
+  clearOauthCookie(response, OAUTH_APP_URL_COOKIE, provider, secure);
   return response;
 }
 
@@ -45,24 +47,25 @@ export async function GET(
     "";
 
   const expectedState = request.cookies.get(OAUTH_STATE_COOKIE)?.value ?? "";
+  const appUrl = request.cookies.get(OAUTH_APP_URL_COOKIE)?.value ?? "";
   if (!state || !expectedState || state !== expectedState) {
     return buildRedirectResponse(
-      buildPlatformOauthReturnUrl({ error: "OAuth session expired. Start the sign-in flow again." }),
+      buildPlatformOauthReturnUrl({ error: "OAuth session expired. Start the sign-in flow again.", appUrl }),
       provider,
       secure
     );
   }
 
   if (providerError) {
-    return buildRedirectResponse(buildPlatformOauthReturnUrl({ error: providerError }), provider, secure);
+    return buildRedirectResponse(buildPlatformOauthReturnUrl({ error: providerError, appUrl }), provider, secure);
   }
 
   try {
     const profile = await exchangePlatformOauthCode(provider, code);
     const result = await loginPlatformUserWithOAuth(profile);
-    return buildRedirectResponse(buildPlatformOauthReturnUrl({ token: result.token }), provider, secure);
+    return buildRedirectResponse(buildPlatformOauthReturnUrl({ token: result.token, appUrl }), provider, secure);
   } catch (error) {
     const asHttpError = toHttpError(error);
-    return buildRedirectResponse(buildPlatformOauthReturnUrl({ error: asHttpError.message }), provider, secure);
+    return buildRedirectResponse(buildPlatformOauthReturnUrl({ error: asHttpError.message, appUrl }), provider, secure);
   }
 }
