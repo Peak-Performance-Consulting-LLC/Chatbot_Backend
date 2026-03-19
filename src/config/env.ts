@@ -25,6 +25,10 @@ const envSchema = z.object({
   FACEBOOK_OAUTH_APP_SECRET: z.string().default(""),
   WIDGET_HOST_URL: z.string().default("http://localhost:5173"),
   BACKEND_PUBLIC_URL: z.string().default("http://localhost:3000"),
+  STRIPE_SECRET_KEY: z.string().default(""),
+  STRIPE_WEBHOOK_SECRET: z.string().default(""),
+  STRIPE_PRICE_STARTER: z.string().default(""),
+  STRIPE_PRICE_GROWTH: z.string().default(""),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000)
 });

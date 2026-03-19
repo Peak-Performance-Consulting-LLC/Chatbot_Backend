@@ -352,8 +352,18 @@ create table if not exists public.platform_subscriptions (
   updated_at timestamptz not null default now()
 );
 
+alter table public.platform_subscriptions
+  add column if not exists stripe_customer_id text,
+  add column if not exists stripe_subscription_id text,
+  add column if not exists stripe_price_id text,
+  add column if not exists cancel_at_period_end boolean not null default false;
+
 create unique index if not exists platform_subscriptions_user_idx
   on public.platform_subscriptions(user_id);
+
+create unique index if not exists platform_subscriptions_stripe_subscription_idx
+  on public.platform_subscriptions(stripe_subscription_id)
+  where stripe_subscription_id is not null;
 
 drop trigger if exists platform_subscriptions_set_updated_at on public.platform_subscriptions;
 create trigger platform_subscriptions_set_updated_at

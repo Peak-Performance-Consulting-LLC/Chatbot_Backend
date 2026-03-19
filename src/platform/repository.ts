@@ -59,7 +59,11 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column platform_users.oauth_avatar_url does not exist") ||
     message.includes("column platform_users.oauth_avatar_provider does not exist") ||
     message.includes("column platform_users.google_user_id does not exist") ||
-    message.includes("column platform_users.facebook_user_id does not exist")
+    message.includes("column platform_users.facebook_user_id does not exist") ||
+    message.includes("column platform_subscriptions.stripe_customer_id does not exist") ||
+    message.includes("column platform_subscriptions.stripe_subscription_id does not exist") ||
+    message.includes("column platform_subscriptions.stripe_price_id does not exist") ||
+    message.includes("column platform_subscriptions.cancel_at_period_end does not exist")
   );
 }
 
@@ -1589,6 +1593,10 @@ type SubscriptionRow = {
   status: string;
   max_tenants: number;
   max_messages_mo: number;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  stripe_price_id: string | null;
+  cancel_at_period_end: boolean;
   trial_ends_at: string | null;
   current_period_start: string;
   current_period_end: string;
@@ -1606,6 +1614,10 @@ export type SubscriptionSummary = {
   status: SubscriptionStatus;
   max_tenants: number;
   max_messages_mo: number;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  stripe_price_id: string | null;
+  cancel_at_period_end: boolean;
   trial_ends_at: string | null;
   trial_days_remaining: number | null;
   current_period_start: string;
@@ -1655,6 +1667,10 @@ function toSubscriptionSummary(row: SubscriptionRow): SubscriptionSummary {
     status,
     max_tenants: row.max_tenants,
     max_messages_mo: row.max_messages_mo,
+    stripe_customer_id: row.stripe_customer_id,
+    stripe_subscription_id: row.stripe_subscription_id,
+    stripe_price_id: row.stripe_price_id,
+    cancel_at_period_end: Boolean(row.cancel_at_period_end),
     trial_ends_at: row.trial_ends_at,
     trial_days_remaining: trialDaysRemaining,
     current_period_start: row.current_period_start,
@@ -1676,6 +1692,10 @@ export async function createTrialSubscription(userId: string): Promise<Subscript
         status: "active",
         max_tenants: limits.max_tenants,
         max_messages_mo: limits.max_messages_mo,
+        stripe_customer_id: null,
+        stripe_subscription_id: null,
+        stripe_price_id: null,
+        cancel_at_period_end: false,
         trial_ends_at: trialEndsAt,
         current_period_start: new Date().toISOString(),
         current_period_end: trialEndsAt
@@ -1731,6 +1751,138 @@ export async function getSubscriptionByUserId(userId: string): Promise<Subscript
   return toSubscriptionSummary(row);
 }
 
+export async function getSubscriptionByStripeSubscriptionId(
+  stripeSubscriptionId: string
+): Promise<SubscriptionSummary | null> {
+  const normalizedId = stripeSubscriptionId.trim();
+  if (!normalizedId) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .select("*")
+    .eq("stripe_subscription_id", normalizedId)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load subscription by Stripe subscription: ${error.message}`);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  return toSubscriptionSummary(data as SubscriptionRow);
+}
+
+function mapStripeStatusToLocal(
+  status: string | null | undefined
+): SubscriptionStatus {
+  const value = status?.trim().toLowerCase();
+  if (
+    value === "past_due" ||
+    value === "unpaid" ||
+    value === "incomplete" ||
+    value === "incomplete_expired"
+  ) {
+    return "past_due";
+  }
+  if (value === "canceled") {
+    return "canceled";
+  }
+  return "active";
+}
+
+export async function syncSubscriptionFromStripe(input: {
+  user_id: string;
+  plan: "starter" | "growth";
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string;
+  stripe_price_id: string | null;
+  stripe_status: string;
+  cancel_at_period_end: boolean;
+  current_period_start: string;
+  current_period_end: string;
+}): Promise<SubscriptionSummary> {
+  const limits = PLAN_LIMITS[input.plan];
+  const payload = {
+    plan: input.plan,
+    status: mapStripeStatusToLocal(input.stripe_status),
+    max_tenants: limits.max_tenants,
+    max_messages_mo: limits.max_messages_mo,
+    stripe_customer_id: input.stripe_customer_id,
+    stripe_subscription_id: input.stripe_subscription_id,
+    stripe_price_id: input.stripe_price_id,
+    cancel_at_period_end: input.cancel_at_period_end,
+    trial_ends_at: null,
+    current_period_start: input.current_period_start,
+    current_period_end: input.current_period_end
+  };
+
+  const existing = await getSubscriptionByUserId(input.user_id);
+  if (existing) {
+    const { data, error } = await supabaseAdmin
+      .from("platform_subscriptions")
+      .update(payload)
+      .eq("user_id", input.user_id)
+      .select("*")
+      .single();
+
+    if (error || !data) {
+      throwPlatformSchemaMissingError(`Failed to sync Stripe subscription: ${error?.message ?? "Unknown error"}`);
+    }
+
+    return toSubscriptionSummary(data as SubscriptionRow);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .insert({
+      user_id: input.user_id,
+      ...payload
+    })
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to create Stripe subscription locally: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toSubscriptionSummary(data as SubscriptionRow);
+}
+
+export async function updateSubscriptionStatusByStripeSubscriptionId(input: {
+  stripe_subscription_id: string;
+  status: SubscriptionStatus;
+  cancel_at_period_end?: boolean;
+  current_period_start?: string;
+  current_period_end?: string;
+}): Promise<SubscriptionSummary | null> {
+  const existing = await getSubscriptionByStripeSubscriptionId(input.stripe_subscription_id);
+  if (!existing) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .update({
+      status: input.status,
+      cancel_at_period_end: input.cancel_at_period_end ?? existing.cancel_at_period_end,
+      current_period_start: input.current_period_start ?? existing.current_period_start,
+      current_period_end: input.current_period_end ?? existing.current_period_end
+    })
+    .eq("stripe_subscription_id", input.stripe_subscription_id)
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to update subscription from Stripe status: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toSubscriptionSummary(data as SubscriptionRow);
+}
+
 export async function updateSubscriptionPlan(
   userId: string,
   plan: "starter" | "growth"
@@ -1749,7 +1901,10 @@ export async function updateSubscriptionPlan(
         status: "active",
         max_tenants: limits.max_tenants,
         max_messages_mo: limits.max_messages_mo,
+        stripe_price_id: null,
+        stripe_subscription_id: null,
         trial_ends_at: null,
+        cancel_at_period_end: false,
         current_period_start: now.toISOString(),
         current_period_end: periodEnd.toISOString()
       })
@@ -1771,7 +1926,11 @@ export async function updateSubscriptionPlan(
       status: "active",
       max_tenants: limits.max_tenants,
       max_messages_mo: limits.max_messages_mo,
+      stripe_customer_id: null,
+      stripe_subscription_id: null,
+      stripe_price_id: null,
       trial_ends_at: null,
+      cancel_at_period_end: false,
       current_period_start: now.toISOString(),
       current_period_end: periodEnd.toISOString()
     })

@@ -1,4 +1,5 @@
 import { randomBytes } from "crypto";
+import type Stripe from "stripe";
 import { getEnv } from "@/config/env";
 import { HttpError } from "@/lib/httpError";
 import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
@@ -12,17 +13,19 @@ import {
   deleteTenantById,
   findTenantIdByDomain,
   getDomainVerification,
+  getSubscriptionByStripeSubscriptionId,
   getSubscriptionByUserId,
   listTenantSources,
   listUserTenants,
   replaceTenantSources,
   resolvePlatformSession,
+  syncSubscriptionFromStripe,
   type SubscriptionSummary,
   type SupportedService,
   type TenantBusinessProfile,
   type TenantSummary,
   updateDomainVerificationStatus,
-  updateSubscriptionPlan,
+  updateSubscriptionStatusByStripeSubscriptionId,
   updateTenantAllowedDomain,
   updateTenantBusinessProfile,
   updateTenantKnowledgeState,
@@ -33,6 +36,14 @@ import {
 } from "@/platform/repository";
 import type { PlatformOauthProfile } from "@/platform/oauth";
 import { verifyDnsTxtRecord } from "@/platform/dns";
+import {
+  buildPlatformCheckoutUrls,
+  getStripeClient,
+  getStripePriceId,
+  isPaidPlan,
+  normalizeStripeMetadataValue,
+  toIsoFromStripeTimestamp
+} from "@/platform/stripe";
 import { buildWidgetConfig } from "@/platform/widget";
 
 function normalizeWebsiteUrl(input: string): URL {
@@ -601,16 +612,194 @@ export async function getMySubscription(token: string) {
   };
 }
 
-export async function subscribeToPlan(input: {
+export async function createSubscriptionCheckout(input: {
   token: string;
   plan: "starter" | "growth";
 }) {
   const user = await resolvePlatformSession(input.token);
-  const subscription = await updateSubscriptionPlan(user.id, input.plan);
+  const subscription = await ensureUserSubscription(user.id);
+  const stripe = getStripeClient();
+
+  if (
+    subscription.plan === input.plan &&
+    subscription.status === "active" &&
+    subscription.stripe_subscription_id &&
+    !subscription.cancel_at_period_end
+  ) {
+    throw new HttpError(400, `Your ${formatSubscriptionPlan(input.plan)} plan is already active.`);
+  }
+
+  const previousSubscriptionId =
+    subscription.stripe_subscription_id && isPaidPlan(subscription.plan)
+      ? subscription.stripe_subscription_id
+      : null;
+  const urls = buildPlatformCheckoutUrls(input.plan);
+  const metadata = {
+    user_id: user.id,
+    plan: input.plan,
+    previous_subscription_id: previousSubscriptionId ?? ""
+  };
+
+  const session = await stripe.checkout.sessions.create({
+    mode: "subscription",
+    client_reference_id: user.id,
+    success_url: urls.success_url,
+    cancel_url: urls.cancel_url,
+    line_items: [
+      {
+        price: getStripePriceId(input.plan),
+        quantity: 1
+      }
+    ],
+    metadata,
+    subscription_data: {
+      metadata
+    },
+    ...(subscription.stripe_customer_id
+      ? { customer: subscription.stripe_customer_id }
+      : { customer_email: user.email })
+  });
+
+  if (!session.url) {
+    throw new HttpError(500, "Stripe Checkout session did not return a hosted URL");
+  }
 
   return {
-    subscription
+    checkout_url: session.url,
+    session_id: session.id
   };
+}
+
+function getInvoiceSubscriptionId(invoice: Stripe.Invoice) {
+  const parentSubscription = invoice.parent?.subscription_details?.subscription;
+  if (typeof parentSubscription === "string") {
+    return parentSubscription;
+  }
+
+  return parentSubscription?.id ?? null;
+}
+
+function getStripeSubscriptionPeriod(subscription: Stripe.Subscription) {
+  const firstItem = subscription.items.data[0];
+  return {
+    current_period_start: toIsoFromStripeTimestamp(firstItem?.current_period_start ?? subscription.created),
+    current_period_end: toIsoFromStripeTimestamp(
+      firstItem?.current_period_end ?? subscription.cancel_at ?? subscription.created
+    )
+  };
+}
+
+async function schedulePreviousStripeSubscriptionForCancellation(stripeSubscriptionId: string) {
+  const stripe = getStripeClient();
+  const previousSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+  if (previousSubscription.status === "canceled" || previousSubscription.cancel_at_period_end) {
+    return;
+  }
+
+  await stripe.subscriptions.update(stripeSubscriptionId, {
+    cancel_at_period_end: true
+  });
+}
+
+async function handleInvoicePaid(invoice: Stripe.Invoice) {
+  const stripeSubscriptionId = getInvoiceSubscriptionId(invoice);
+  if (!stripeSubscriptionId) {
+    return { handled: false, reason: "missing_subscription_id" as const };
+  }
+
+  const stripe = getStripeClient();
+  const stripeSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+  const userId = normalizeStripeMetadataValue(stripeSubscription.metadata.user_id);
+  const plan = normalizeStripeMetadataValue(stripeSubscription.metadata.plan);
+  const previousSubscriptionId = normalizeStripeMetadataValue(
+    stripeSubscription.metadata.previous_subscription_id
+  );
+
+  if (!userId || !plan || !isPaidPlan(plan)) {
+    return { handled: false, reason: "missing_metadata" as const };
+  }
+
+  const currentLocalSubscription = await getSubscriptionByUserId(userId);
+  if (
+    currentLocalSubscription?.stripe_subscription_id &&
+    currentLocalSubscription.stripe_subscription_id !== stripeSubscription.id &&
+    previousSubscriptionId !== currentLocalSubscription.stripe_subscription_id
+  ) {
+    return { handled: false, reason: "obsolete_subscription" as const };
+  }
+
+  if (previousSubscriptionId && previousSubscriptionId !== stripeSubscription.id) {
+    await schedulePreviousStripeSubscriptionForCancellation(previousSubscriptionId);
+  }
+
+  const subscriptionPeriod = getStripeSubscriptionPeriod(stripeSubscription);
+
+  await syncSubscriptionFromStripe({
+    user_id: userId,
+    plan,
+    stripe_customer_id:
+      typeof stripeSubscription.customer === "string"
+        ? stripeSubscription.customer
+        : stripeSubscription.customer?.id ?? null,
+    stripe_subscription_id: stripeSubscription.id,
+    stripe_price_id: stripeSubscription.items.data[0]?.price.id ?? null,
+    stripe_status: stripeSubscription.status,
+    cancel_at_period_end: Boolean(stripeSubscription.cancel_at_period_end),
+    current_period_start: subscriptionPeriod.current_period_start,
+    current_period_end: subscriptionPeriod.current_period_end
+  });
+
+  return { handled: true as const };
+}
+
+async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
+  const stripeSubscriptionId = getInvoiceSubscriptionId(invoice);
+  if (!stripeSubscriptionId) {
+    return { handled: false, reason: "missing_subscription_id" as const };
+  }
+
+  const localSubscription = await getSubscriptionByStripeSubscriptionId(stripeSubscriptionId);
+  if (!localSubscription) {
+    return { handled: false, reason: "unknown_subscription" as const };
+  }
+
+  await updateSubscriptionStatusByStripeSubscriptionId({
+    stripe_subscription_id: stripeSubscriptionId,
+    status: "past_due"
+  });
+
+  return { handled: true as const };
+}
+
+async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
+  const localSubscription = await getSubscriptionByStripeSubscriptionId(subscription.id);
+  if (!localSubscription) {
+    return { handled: false, reason: "unknown_subscription" as const };
+  }
+  const subscriptionPeriod = getStripeSubscriptionPeriod(subscription);
+
+  await updateSubscriptionStatusByStripeSubscriptionId({
+    stripe_subscription_id: subscription.id,
+    status: "canceled",
+    cancel_at_period_end: Boolean(subscription.cancel_at_period_end),
+    current_period_start: subscriptionPeriod.current_period_start,
+    current_period_end: subscriptionPeriod.current_period_end
+  });
+
+  return { handled: true as const };
+}
+
+export async function handleStripeWebhookEvent(event: Stripe.Event) {
+  switch (event.type) {
+    case "invoice.paid":
+      return handleInvoicePaid(event.data.object as Stripe.Invoice);
+    case "invoice.payment_failed":
+      return handleInvoicePaymentFailed(event.data.object as Stripe.Invoice);
+    case "customer.subscription.deleted":
+      return handleSubscriptionDeleted(event.data.object as Stripe.Subscription);
+    default:
+      return { handled: false, reason: "ignored_event_type" as const };
+  }
 }
 
 export async function enforcePlanLimits(userId: string, action: "create_tenant") {

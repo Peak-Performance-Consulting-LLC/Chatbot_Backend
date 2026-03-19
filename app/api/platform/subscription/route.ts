@@ -2,7 +2,7 @@ import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
 import { platformSubscribeSchema } from "@/platform/schemas";
-import { getMySubscription, subscribeToPlan } from "@/platform/service";
+import { createSubscriptionCheckout, getMySubscription } from "@/platform/service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await subscribeToPlan({
+    const result = await createSubscriptionCheckout({
       token,
       plan: parsed.data.plan
     });
