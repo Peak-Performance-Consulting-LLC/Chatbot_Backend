@@ -18,8 +18,13 @@ const envSchema = z.object({
   PLATFORM_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
   PLATFORM_AUTO_INGEST_ON_SIGNUP: z.string().optional(),
   PLATFORM_AUTO_INGEST_ON_SOURCE_UPDATE: z.string().optional(),
+  PLATFORM_APP_URL: z.string().default("http://localhost:5173"),
+  GOOGLE_OAUTH_CLIENT_ID: z.string().default(""),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().default(""),
+  FACEBOOK_OAUTH_APP_ID: z.string().default(""),
+  FACEBOOK_OAUTH_APP_SECRET: z.string().default(""),
   WIDGET_HOST_URL: z.string().default("http://localhost:5173"),
-  BACKEND_PUBLIC_URL: z.string().default("http://localhost:4000"),
+  BACKEND_PUBLIC_URL: z.string().default("http://localhost:3000"),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000)
 });

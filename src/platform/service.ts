@@ -8,6 +8,7 @@ import {
   createPlatformUser,
   createTenantForUser,
   deletePlatformUserById,
+  deleteTenantById,
   findTenantIdByDomain,
   getDomainVerification,
   listTenantSources,
@@ -21,9 +22,12 @@ import {
   updateTenantAllowedDomain,
   updateTenantBusinessProfile,
   updateTenantKnowledgeState,
+  updatePlatformUser,
+  upsertPlatformOauthUser,
   upsertDomainVerification,
   validatePlatformCredentials
 } from "@/platform/repository";
+import type { PlatformOauthProfile } from "@/platform/oauth";
 import { verifyDnsTxtRecord } from "@/platform/dns";
 import { buildWidgetConfig } from "@/platform/widget";
 
@@ -540,6 +544,25 @@ export async function loginPlatformUser(input: { email: string; password: string
   };
 }
 
+export async function loginPlatformUserWithOAuth(input: PlatformOauthProfile) {
+  const user = await upsertPlatformOauthUser({
+    provider: input.provider,
+    providerUserId: input.provider_user_id,
+    email: input.email,
+    fullName: input.full_name,
+    avatarUrl: input.avatar_url
+  });
+  const session = await createPlatformSession(user.id);
+  const tenants = await listUserTenants(user.id);
+
+  return {
+    user,
+    token: session.token,
+    expires_at: session.expires_at,
+    tenants: tenants.map(toPlatformTenant)
+  };
+}
+
 export async function getPlatformProfile(token: string) {
   const user = await resolvePlatformSession(token);
   const tenants = await listUserTenants(user.id);
@@ -703,4 +726,43 @@ export async function replaceTenantSourcesForUser(input: {
     knowledge_base: tenant.knowledge_base,
     ingestion
   };
+}
+
+export async function deletePlatformWorkspace(input: {
+  token: string;
+  tenant_id: string;
+}) {
+  const user = await resolvePlatformSession(input.token);
+  await assertTenantOwnership(user.id, input.tenant_id);
+  await deleteTenantById(input.tenant_id);
+  return { tenant_id: input.tenant_id, deleted: true };
+}
+
+export async function updatePlatformUserProfile(input: {
+  token: string;
+  full_name?: string;
+  email?: string;
+  current_password?: string;
+  new_password?: string;
+  avatar_url?: string | null;
+}) {
+  const user = await resolvePlatformSession(input.token);
+
+  if (input.new_password) {
+    if (user.has_password && !input.current_password) {
+      throw new HttpError(400, "Current password is required to set a new password");
+    }
+    if (user.has_password && input.current_password) {
+      await validatePlatformCredentials({ email: user.email, password: input.current_password });
+    }
+  }
+
+  const updated = await updatePlatformUser(user.id, {
+    full_name: input.full_name,
+    email: input.email,
+    password: input.new_password,
+    avatar_url: input.avatar_url
+  });
+
+  return { user: updated };
 }

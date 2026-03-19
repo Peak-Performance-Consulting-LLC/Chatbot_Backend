@@ -238,9 +238,44 @@ create table if not exists public.platform_users (
   id uuid primary key default gen_random_uuid(),
   full_name text not null,
   email text not null unique,
-  password_hash text not null,
+  password_hash text,
+  avatar_url text,
+  avatar_source text not null default 'initials',
+  oauth_avatar_url text,
+  oauth_avatar_provider text,
+  google_user_id text,
+  facebook_user_id text,
   created_at timestamptz not null default now()
 );
+
+alter table public.platform_users
+  add column if not exists avatar_url text,
+  add column if not exists avatar_source text not null default 'initials',
+  add column if not exists oauth_avatar_url text,
+  add column if not exists oauth_avatar_provider text,
+  add column if not exists google_user_id text,
+  add column if not exists facebook_user_id text;
+
+alter table public.platform_users
+  alter column password_hash drop not null;
+
+alter table public.platform_users
+  drop constraint if exists platform_users_avatar_source_check,
+  drop constraint if exists platform_users_oauth_avatar_provider_check;
+
+alter table public.platform_users
+  add constraint platform_users_avatar_source_check
+    check (avatar_source in ('initials', 'manual', 'google', 'facebook')),
+  add constraint platform_users_oauth_avatar_provider_check
+    check (oauth_avatar_provider is null or oauth_avatar_provider in ('google', 'facebook'));
+
+create unique index if not exists platform_users_google_user_id_idx
+  on public.platform_users (google_user_id)
+  where google_user_id is not null;
+
+create unique index if not exists platform_users_facebook_user_id_idx
+  on public.platform_users (facebook_user_id)
+  where facebook_user_id is not null;
 
 create table if not exists public.platform_sessions (
   id uuid primary key default gen_random_uuid(),

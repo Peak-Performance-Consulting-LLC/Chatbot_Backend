@@ -5,6 +5,18 @@ const optionalUrlSchema = z.preprocess(
   (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
   urlSchema.optional()
 );
+const clearableOptionalUrlSchema = z.preprocess(
+  (value) => {
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === "string" && value.trim() === "") {
+      return null;
+    }
+    return value;
+  },
+  urlSchema.nullable().optional()
+);
 const colorSchema = z.string().trim().regex(
   /^(#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{6})|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*(0|1|0?\.\d+))?\s*\))$/,
   "Use a valid hex or rgba color"
@@ -120,4 +132,16 @@ export const platformTenantSourcesSchema = z.object({
       })
     )
     .max(200)
+});
+
+export const platformDeleteWorkspaceSchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80)
+});
+
+export const platformUpdateUserSchema = z.object({
+  full_name: z.string().trim().min(2).max(120).optional(),
+  email: z.string().trim().email().max(160).optional(),
+  current_password: z.string().min(8).max(120).optional(),
+  new_password: z.string().min(8).max(120).optional(),
+  avatar_url: clearableOptionalUrlSchema
 });

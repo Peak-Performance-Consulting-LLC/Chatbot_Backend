@@ -50,7 +50,14 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column tenants.header_cta_notice does not exist") ||
     message.includes("column tenant_domain_verifications.last_checked_at does not exist") ||
     message.includes("column tenant_domain_verifications.last_error does not exist") ||
-    message.includes("column tenant_domain_verifications.last_seen_records does not exist")
+    message.includes("column tenant_domain_verifications.last_seen_records does not exist") ||
+    message.includes('null value in column "password_hash" of relation "platform_users" violates not-null constraint') ||
+    message.includes("column platform_users.avatar_url does not exist") ||
+    message.includes("column platform_users.avatar_source does not exist") ||
+    message.includes("column platform_users.oauth_avatar_url does not exist") ||
+    message.includes("column platform_users.oauth_avatar_provider does not exist") ||
+    message.includes("column platform_users.google_user_id does not exist") ||
+    message.includes("column platform_users.facebook_user_id does not exist")
   );
 }
 
@@ -69,7 +76,13 @@ type PlatformUserRow = {
   id: string;
   email: string;
   full_name: string;
-  password_hash: string;
+  password_hash: string | null;
+  avatar_url: string | null;
+  avatar_source: string | null;
+  oauth_avatar_url: string | null;
+  oauth_avatar_provider: PlatformOauthProvider | null;
+  google_user_id: string | null;
+  facebook_user_id: string | null;
   created_at: string;
 };
 
@@ -90,6 +103,9 @@ export type BgPattern = "none" | "dots" | "grid" | "waves";
 export type LauncherIcon = "chat" | "sparkle" | "headset" | "zap" | "heart";
 export type AiTone = "friendly" | "professional" | "concise" | "enthusiastic";
 export type NotifAnimation = "bounce" | "pulse" | "slide";
+export type PlatformOauthProvider = "google" | "facebook";
+export type PlatformUserAvatarSource = "initials" | "manual" | PlatformOauthProvider;
+export type PlatformAuthProvider = "password" | PlatformOauthProvider;
 
 type DomainVerificationRow = {
   tenant_id: string;
@@ -178,6 +194,17 @@ const defaultPalette = {
 } as const;
 const defaultQuickReplies = ["How does this work?", "Pricing plans", "Get support"] as const;
 const defaultNotifChips = ["I have a question", "Tell me more"] as const;
+
+export type PlatformUserSummary = {
+  id: string;
+  email: string;
+  full_name: string;
+  avatar_url: string | null;
+  avatar_source: PlatformUserAvatarSource;
+  has_password: boolean;
+  auth_providers: PlatformAuthProvider[];
+  created_at: string;
+};
 
 export type PlatformSession = {
   token: string;
@@ -330,6 +357,51 @@ function normalizeOptionalUrl(input: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizePlatformOauthProvider(input: string | null | undefined): PlatformOauthProvider | null {
+  const value = input?.trim().toLowerCase();
+  if (value === "google" || value === "facebook") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeAvatarSource(input: string | null | undefined): PlatformUserAvatarSource {
+  const value = input?.trim().toLowerCase();
+  if (value === "manual" || value === "google" || value === "facebook") {
+    return value;
+  }
+  return "initials";
+}
+
+function listAuthProviders(row: PlatformUserRow): PlatformAuthProvider[] {
+  const providers: PlatformAuthProvider[] = [];
+
+  if (row.password_hash) {
+    providers.push("password");
+  }
+  if (row.google_user_id) {
+    providers.push("google");
+  }
+  if (row.facebook_user_id) {
+    providers.push("facebook");
+  }
+
+  return providers;
+}
+
+function toPlatformUserSummary(row: PlatformUserRow): PlatformUserSummary {
+  return {
+    id: row.id,
+    email: row.email,
+    full_name: row.full_name,
+    avatar_url: normalizeOptionalUrl(row.avatar_url),
+    avatar_source: normalizeAvatarSource(row.avatar_source),
+    has_password: Boolean(row.password_hash),
+    auth_providers: listAuthProviders(row),
+    created_at: row.created_at
+  };
 }
 
 function normalizeStringList(
@@ -556,6 +628,24 @@ export async function getPlatformUserByEmail(email: string): Promise<PlatformUse
   return (data as PlatformUserRow | null) ?? null;
 }
 
+async function getPlatformUserByOauthId(
+  provider: PlatformOauthProvider,
+  providerUserId: string
+): Promise<PlatformUserRow | null> {
+  const column = provider === "google" ? "google_user_id" : "facebook_user_id";
+  const { data, error } = await supabaseAdmin
+    .from("platform_users")
+    .select("*")
+    .eq(column, providerUserId.trim())
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load platform user: ${error.message}`);
+  }
+
+  return (data as PlatformUserRow | null) ?? null;
+}
+
 export async function deletePlatformUserById(userId: string): Promise<void> {
   const { error } = await supabaseAdmin
     .from("platform_users")
@@ -589,7 +679,7 @@ export async function createPlatformUser(input: {
   fullName: string;
   email: string;
   password: string;
-}): Promise<Pick<PlatformUserRow, "id" | "email" | "full_name" | "created_at">> {
+}): Promise<PlatformUserSummary> {
   const normalizedEmail = input.email.trim().toLowerCase();
   const existing = await getPlatformUserByEmail(normalizedEmail);
   if (existing) {
@@ -603,31 +693,128 @@ export async function createPlatformUser(input: {
       email: normalizedEmail,
       password_hash: hashPassword(input.password)
     })
-    .select("id, email, full_name, created_at")
+    .select("*")
     .single();
 
   if (error || !data) {
-    throw new HttpError(500, `Failed to create platform user: ${error?.message ?? "Unknown error"}`);
+    throwPlatformSchemaMissingError(`Failed to create platform user: ${error?.message ?? "Unknown error"}`);
   }
 
-  return data as Pick<PlatformUserRow, "id" | "email" | "full_name" | "created_at">;
+  return toPlatformUserSummary(data as PlatformUserRow);
 }
 
 export async function validatePlatformCredentials(input: {
   email: string;
   password: string;
-}): Promise<Pick<PlatformUserRow, "id" | "email" | "full_name" | "created_at">> {
+}): Promise<PlatformUserSummary> {
   const user = await getPlatformUserByEmail(input.email);
-  if (!user || !verifyPassword(input.password, user.password_hash)) {
+  if (!user) {
     throw new HttpError(401, "Invalid email or password");
   }
 
-  return {
-    id: user.id,
-    email: user.email,
-    full_name: user.full_name,
-    created_at: user.created_at
-  };
+  if (!user.password_hash) {
+    throw new HttpError(401, "This account uses social login. Continue with Google or Facebook, or add a password in Account settings.");
+  }
+
+  if (!verifyPassword(input.password, user.password_hash)) {
+    throw new HttpError(401, "Invalid email or password");
+  }
+
+  return toPlatformUserSummary(user);
+}
+
+export async function upsertPlatformOauthUser(input: {
+  provider: PlatformOauthProvider;
+  providerUserId: string;
+  email: string;
+  fullName: string;
+  avatarUrl?: string | null;
+}): Promise<PlatformUserSummary> {
+  const providerUserId = input.providerUserId.trim();
+  if (!providerUserId) {
+    throw new HttpError(400, "OAuth provider user ID is required");
+  }
+
+  const normalizedEmail = input.email.trim().toLowerCase();
+  const normalizedFullName =
+    input.fullName.trim().slice(0, 120) || normalizedEmail.split("@")[0] || "Platform User";
+  const normalizedAvatarUrl = normalizeOptionalUrl(input.avatarUrl);
+
+  let user = await getPlatformUserByOauthId(input.provider, providerUserId);
+  if (!user) {
+    user = await getPlatformUserByEmail(normalizedEmail);
+  }
+
+  if (!user) {
+    const { data, error } = await supabaseAdmin
+      .from("platform_users")
+      .insert({
+        full_name: normalizedFullName,
+        email: normalizedEmail,
+        password_hash: null,
+        avatar_url: normalizedAvatarUrl,
+        avatar_source: normalizedAvatarUrl ? input.provider : "initials",
+        oauth_avatar_url: normalizedAvatarUrl,
+        oauth_avatar_provider: normalizedAvatarUrl ? input.provider : null,
+        google_user_id: input.provider === "google" ? providerUserId : null,
+        facebook_user_id: input.provider === "facebook" ? providerUserId : null
+      })
+      .select("*")
+      .single();
+
+    if (error || !data) {
+      throwPlatformSchemaMissingError(`Failed to create platform user: ${error?.message ?? "Unknown error"}`);
+    }
+
+    return toPlatformUserSummary(data as PlatformUserRow);
+  }
+
+  const payload: Record<string, unknown> = {};
+  if (user.email !== normalizedEmail) {
+    payload.email = normalizedEmail;
+  }
+  if (normalizedFullName && normalizedFullName !== user.full_name) {
+    payload.full_name = normalizedFullName;
+  }
+
+  if (input.provider === "google" && user.google_user_id !== providerUserId) {
+    payload.google_user_id = providerUserId;
+  }
+  if (input.provider === "facebook" && user.facebook_user_id !== providerUserId) {
+    payload.facebook_user_id = providerUserId;
+  }
+
+  if (normalizedAvatarUrl) {
+    payload.oauth_avatar_url = normalizedAvatarUrl;
+    payload.oauth_avatar_provider = input.provider;
+
+    if (normalizeAvatarSource(user.avatar_source) !== "manual") {
+      payload.avatar_url = normalizedAvatarUrl;
+      payload.avatar_source = input.provider;
+    }
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return toPlatformUserSummary(user);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_users")
+    .update(payload)
+    .eq("id", user.id)
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to update platform user: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toPlatformUserSummary(data as PlatformUserRow);
+}
+
+export async function hasPlatformPassword(userId: string): Promise<boolean> {
+  const user = await getPlatformUserById(userId);
+  return Boolean(user?.password_hash);
 }
 
 export async function createPlatformSession(userId: string): Promise<PlatformSession> {
@@ -656,7 +843,7 @@ export async function createPlatformSession(userId: string): Promise<PlatformSes
 
 export async function resolvePlatformSession(
   token: string
-): Promise<Pick<PlatformUserRow, "id" | "email" | "full_name" | "created_at">> {
+): Promise<PlatformUserSummary> {
   const { data, error } = await supabaseAdmin
     .from("platform_sessions")
     .select("*")
@@ -681,12 +868,7 @@ export async function resolvePlatformSession(
     throw new HttpError(401, "Session user not found");
   }
 
-  return {
-    id: user.id,
-    email: user.email,
-    full_name: user.full_name,
-    created_at: user.created_at
-  };
+  return toPlatformUserSummary(user);
 }
 
 export async function createTenantForUser(input: {
@@ -1177,6 +1359,98 @@ export async function updateTenantBusinessProfile(
   clearTenantCache(tenantId);
 
   return next;
+}
+
+export async function deleteTenantById(tenantId: string): Promise<void> {
+  // Delete sources first (may not cascade)
+  await supabaseAdmin.from("tenant_sources").delete().eq("tenant_id", tenantId);
+  await supabaseAdmin.from("tenant_domain_verifications").delete().eq("tenant_id", tenantId);
+  await supabaseAdmin.from("platform_user_tenants").delete().eq("tenant_id", tenantId);
+
+  const { error } = await supabaseAdmin
+    .from("tenants")
+    .delete()
+    .eq("tenant_id", tenantId);
+
+  if (error) {
+    throw new HttpError(500, `Failed to delete tenant: ${error.message}`);
+  }
+}
+
+export async function updatePlatformUser(
+  userId: string,
+  input: {
+    full_name?: string;
+    email?: string;
+    password?: string;
+    avatar_url?: string | null;
+  }
+): Promise<PlatformUserSummary> {
+  const currentUser = await getPlatformUserById(userId);
+  if (!currentUser) {
+    throw new HttpError(404, "User not found");
+  }
+
+  const payload: Record<string, unknown> = {};
+
+  if (input.full_name !== undefined) {
+    const trimmed = input.full_name.trim();
+    if (trimmed.length < 2) throw new HttpError(400, "Name must be at least 2 characters");
+    payload.full_name = trimmed;
+  }
+
+  if (input.email !== undefined) {
+    const normalizedEmail = input.email.trim().toLowerCase();
+    const existingUser = await getPlatformUserByEmail(normalizedEmail);
+    if (existingUser && existingUser.id !== userId) {
+      throw new HttpError(409, "Email is already in use by another account");
+    }
+    payload.email = normalizedEmail;
+  }
+
+  if (input.password !== undefined) {
+    if (input.password.length < 8) throw new HttpError(400, "Password must be at least 8 characters");
+    payload.password_hash = hashPassword(input.password);
+  }
+
+  if (input.avatar_url !== undefined) {
+    const rawAvatarUrl = typeof input.avatar_url === "string" ? input.avatar_url.trim() : "";
+
+    if (input.avatar_url === null || rawAvatarUrl.length === 0) {
+      const oauthProvider = normalizePlatformOauthProvider(currentUser.oauth_avatar_provider);
+      if (currentUser.oauth_avatar_url && oauthProvider) {
+        payload.avatar_url = currentUser.oauth_avatar_url;
+        payload.avatar_source = oauthProvider;
+      } else {
+        payload.avatar_url = null;
+        payload.avatar_source = "initials";
+      }
+    } else {
+      const normalizedAvatarUrl = normalizeOptionalUrl(rawAvatarUrl);
+      if (!normalizedAvatarUrl) {
+        throw new HttpError(400, "Profile image URL must be a valid URL");
+      }
+      payload.avatar_url = normalizedAvatarUrl;
+      payload.avatar_source = "manual";
+    }
+  }
+
+  if (Object.keys(payload).length === 0) {
+    throw new HttpError(400, "No fields to update");
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_users")
+    .update(payload)
+    .eq("id", userId)
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to update user: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toPlatformUserSummary(data as PlatformUserRow);
 }
 
 export async function listUserTenants(userId: string): Promise<TenantSummary[]> {
