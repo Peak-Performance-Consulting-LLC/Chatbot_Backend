@@ -5,20 +5,24 @@ import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
 import {
   assertTenantOwnership,
   createPlatformSession,
+  createTrialSubscription,
   createPlatformUser,
   createTenantForUser,
   deletePlatformUserById,
   deleteTenantById,
   findTenantIdByDomain,
   getDomainVerification,
+  getSubscriptionByUserId,
   listTenantSources,
   listUserTenants,
   replaceTenantSources,
   resolvePlatformSession,
+  type SubscriptionSummary,
   type SupportedService,
   type TenantBusinessProfile,
   type TenantSummary,
   updateDomainVerificationStatus,
+  updateSubscriptionPlan,
   updateTenantAllowedDomain,
   updateTenantBusinessProfile,
   updateTenantKnowledgeState,
@@ -172,6 +176,28 @@ function toPlatformTenant(tenant: TenantSummary) {
   };
 }
 
+function formatSubscriptionPlan(plan: SubscriptionSummary["plan"]): string {
+  switch (plan) {
+    case "starter":
+      return "Starter";
+    case "growth":
+      return "Growth";
+    case "enterprise":
+      return "Enterprise";
+    default:
+      return "Trial";
+  }
+}
+
+async function ensureUserSubscription(userId: string): Promise<SubscriptionSummary> {
+  const existing = await getSubscriptionByUserId(userId);
+  if (existing) {
+    return existing;
+  }
+
+  return createTrialSubscription(userId);
+}
+
 async function getOwnedTenantSummary(userId: string, tenantId: string) {
   const tenants = await listUserTenants(userId);
   const tenant = tenants.find((item) => item.tenant_id === tenantId);
@@ -296,6 +322,7 @@ export async function signupPlatformTenant(input: {
 
   let tenant;
   try {
+    await createTrialSubscription(user.id);
     tenant = await createTenantForUser({
       userId: user.id,
       companyName: input.company_name,
@@ -376,6 +403,8 @@ export async function createPlatformWorkspace(input: {
   if (existingTenantId) {
     throw new HttpError(409, "This domain is already connected to another workspace");
   }
+
+  await enforcePlanLimits(user.id, "create_tenant");
 
   const tenant = await createTenantForUser({
     userId: user.id,
@@ -563,13 +592,64 @@ export async function loginPlatformUserWithOAuth(input: PlatformOauthProfile) {
   };
 }
 
+export async function getMySubscription(token: string) {
+  const user = await resolvePlatformSession(token);
+  const subscription = await ensureUserSubscription(user.id);
+
+  return {
+    subscription
+  };
+}
+
+export async function subscribeToPlan(input: {
+  token: string;
+  plan: "starter" | "growth";
+}) {
+  const user = await resolvePlatformSession(input.token);
+  const subscription = await updateSubscriptionPlan(user.id, input.plan);
+
+  return {
+    subscription
+  };
+}
+
+export async function enforcePlanLimits(userId: string, action: "create_tenant") {
+  const subscription = await ensureUserSubscription(userId);
+
+  if (subscription.status !== "active") {
+    if (subscription.plan === "trial" && subscription.status === "expired") {
+      throw new HttpError(403, "Your 14-day trial has expired. Choose Starter or Growth to create another workspace.");
+    }
+
+    throw new HttpError(
+      403,
+      `Your ${formatSubscriptionPlan(subscription.plan)} plan is not active. Update your subscription to continue.`
+    );
+  }
+
+  if (action === "create_tenant" && subscription.max_tenants < 999) {
+    const tenants = await listUserTenants(userId);
+    if (tenants.length >= subscription.max_tenants) {
+      const workspaceLabel = subscription.max_tenants === 1 ? "workspace" : "workspaces";
+      throw new HttpError(
+        403,
+        `${formatSubscriptionPlan(subscription.plan)} allows ${subscription.max_tenants} ${workspaceLabel}. Upgrade your plan to create another workspace.`
+      );
+    }
+  }
+
+  return subscription;
+}
+
 export async function getPlatformProfile(token: string) {
   const user = await resolvePlatformSession(token);
   const tenants = await listUserTenants(user.id);
+  const subscription = await ensureUserSubscription(user.id);
 
   return {
     user,
-    tenants: tenants.map(toPlatformTenant)
+    tenants: tenants.map(toPlatformTenant),
+    subscription
   };
 }
 

@@ -145,3 +145,7 @@ export const platformUpdateUserSchema = z.object({
   new_password: z.string().min(8).max(120).optional(),
   avatar_url: clearableOptionalUrlSchema
 });
+
+export const platformSubscribeSchema = z.object({
+  plan: z.enum(["starter", "growth"])
+});

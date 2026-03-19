@@ -331,3 +331,32 @@ create table if not exists public.tenant_sources (
 
 create index if not exists tenant_sources_tenant_idx
   on public.tenant_sources(tenant_id, created_at asc);
+
+-- ============================================================================
+-- SUBSCRIPTIONS (pricing & 14-day trial)
+-- ============================================================================
+
+create table if not exists public.platform_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.platform_users(id) on delete cascade,
+  plan text not null default 'trial'
+    check (plan in ('trial', 'starter', 'growth', 'enterprise')),
+  status text not null default 'active'
+    check (status in ('active', 'canceled', 'expired', 'past_due')),
+  max_tenants int not null default 5,
+  max_messages_mo int not null default 100000,
+  trial_ends_at timestamptz,
+  current_period_start timestamptz not null default now(),
+  current_period_end timestamptz not null default (now() + interval '30 days'),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists platform_subscriptions_user_idx
+  on public.platform_subscriptions(user_id);
+
+drop trigger if exists platform_subscriptions_set_updated_at on public.platform_subscriptions;
+create trigger platform_subscriptions_set_updated_at
+before update on public.platform_subscriptions
+for each row
+execute procedure public.set_updated_at();

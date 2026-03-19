@@ -11,11 +11,13 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("Could not find the table 'public.platform_user_tenants'") ||
     message.includes("Could not find the table 'public.tenant_domain_verifications'") ||
     message.includes("Could not find the table 'public.tenant_sources'") ||
+    message.includes("Could not find the table 'public.platform_subscriptions'") ||
     message.includes('relation "public.platform_users" does not exist') ||
     message.includes('relation "public.platform_sessions" does not exist') ||
     message.includes('relation "public.platform_user_tenants" does not exist') ||
     message.includes('relation "public.tenant_domain_verifications" does not exist') ||
     message.includes('relation "public.tenant_sources" does not exist') ||
+    message.includes('relation "public.platform_subscriptions" does not exist') ||
     message.includes("column tenants.business_type does not exist") ||
     message.includes("column tenants.supported_services does not exist") ||
     message.includes("column tenants.support_phone does not exist") ||
@@ -1574,4 +1576,215 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     }),
     domain_verification: mapDomainVerification(verificationByTenant.get(tenant.tenant_id) ?? null)
   }));
+}
+
+// ============================================================================
+// SUBSCRIPTIONS
+// ============================================================================
+
+type SubscriptionRow = {
+  id: string;
+  user_id: string;
+  plan: string;
+  status: string;
+  max_tenants: number;
+  max_messages_mo: number;
+  trial_ends_at: string | null;
+  current_period_start: string;
+  current_period_end: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SubscriptionPlan = "trial" | "starter" | "growth" | "enterprise";
+export type SubscriptionStatus = "active" | "canceled" | "expired" | "past_due";
+
+export type SubscriptionSummary = {
+  id: string;
+  user_id: string;
+  plan: SubscriptionPlan;
+  status: SubscriptionStatus;
+  max_tenants: number;
+  max_messages_mo: number;
+  trial_ends_at: string | null;
+  trial_days_remaining: number | null;
+  current_period_start: string;
+  current_period_end: string;
+  created_at: string;
+};
+
+const PLAN_LIMITS: Record<SubscriptionPlan, { max_tenants: number; max_messages_mo: number }> = {
+  trial: { max_tenants: 5, max_messages_mo: 100_000 },
+  starter: { max_tenants: 1, max_messages_mo: 10_000 },
+  growth: { max_tenants: 5, max_messages_mo: 100_000 },
+  enterprise: { max_tenants: 999, max_messages_mo: 1_000_000 }
+};
+
+function normalizeSubscriptionPlan(input: string | null | undefined): SubscriptionPlan {
+  const value = input?.trim().toLowerCase();
+  if (value === "starter" || value === "growth" || value === "enterprise") {
+    return value;
+  }
+  return "trial";
+}
+
+function normalizeSubscriptionStatus(input: string | null | undefined): SubscriptionStatus {
+  const value = input?.trim().toLowerCase();
+  if (value === "canceled" || value === "expired" || value === "past_due") {
+    return value;
+  }
+  return "active";
+}
+
+function toSubscriptionSummary(row: SubscriptionRow): SubscriptionSummary {
+  const plan = normalizeSubscriptionPlan(row.plan);
+  const status = normalizeSubscriptionStatus(row.status);
+  let trialDaysRemaining: number | null = null;
+
+  if (plan === "trial" && row.trial_ends_at) {
+    const remaining = Math.ceil(
+      (new Date(row.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+    );
+    trialDaysRemaining = Math.max(0, remaining);
+  }
+
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    plan,
+    status,
+    max_tenants: row.max_tenants,
+    max_messages_mo: row.max_messages_mo,
+    trial_ends_at: row.trial_ends_at,
+    trial_days_remaining: trialDaysRemaining,
+    current_period_start: row.current_period_start,
+    current_period_end: row.current_period_end,
+    created_at: row.created_at
+  };
+}
+
+export async function createTrialSubscription(userId: string): Promise<SubscriptionSummary> {
+  const limits = PLAN_LIMITS.trial;
+  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .upsert(
+      {
+        user_id: userId,
+        plan: "trial",
+        status: "active",
+        max_tenants: limits.max_tenants,
+        max_messages_mo: limits.max_messages_mo,
+        trial_ends_at: trialEndsAt,
+        current_period_start: new Date().toISOString(),
+        current_period_end: trialEndsAt
+      },
+      { onConflict: "user_id" }
+    )
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to create trial subscription: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toSubscriptionSummary(data as SubscriptionRow);
+}
+
+export async function getSubscriptionByUserId(userId: string): Promise<SubscriptionSummary | null> {
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load subscription: ${error.message}`);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const row = data as SubscriptionRow;
+
+  // Auto-expire trial if past trial_ends_at
+  if (
+    normalizeSubscriptionPlan(row.plan) === "trial" &&
+    normalizeSubscriptionStatus(row.status) === "active" &&
+    row.trial_ends_at &&
+    new Date(row.trial_ends_at).getTime() < Date.now()
+  ) {
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from("platform_subscriptions")
+      .update({ status: "expired" })
+      .eq("id", row.id)
+      .select("*")
+      .single();
+
+    if (!updateError && updated) {
+      return toSubscriptionSummary(updated as SubscriptionRow);
+    }
+  }
+
+  return toSubscriptionSummary(row);
+}
+
+export async function updateSubscriptionPlan(
+  userId: string,
+  plan: "starter" | "growth"
+): Promise<SubscriptionSummary> {
+  const limits = PLAN_LIMITS[plan];
+  const now = new Date();
+  const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+  const existing = await getSubscriptionByUserId(userId);
+
+  if (existing) {
+    const { data, error } = await supabaseAdmin
+      .from("platform_subscriptions")
+      .update({
+        plan,
+        status: "active",
+        max_tenants: limits.max_tenants,
+        max_messages_mo: limits.max_messages_mo,
+        trial_ends_at: null,
+        current_period_start: now.toISOString(),
+        current_period_end: periodEnd.toISOString()
+      })
+      .eq("user_id", userId)
+      .select("*")
+      .single();
+
+    if (error || !data) {
+      throwPlatformSchemaMissingError(`Failed to update subscription: ${error?.message ?? "Unknown error"}`);
+    }
+    return toSubscriptionSummary(data as SubscriptionRow);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_subscriptions")
+    .insert({
+      user_id: userId,
+      plan,
+      status: "active",
+      max_tenants: limits.max_tenants,
+      max_messages_mo: limits.max_messages_mo,
+      trial_ends_at: null,
+      current_period_start: now.toISOString(),
+      current_period_end: periodEnd.toISOString()
+    })
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to create subscription: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return toSubscriptionSummary(data as SubscriptionRow);
+}
+
+export function getPlanLimits(plan: SubscriptionPlan) {
+  return PLAN_LIMITS[plan] ?? PLAN_LIMITS.trial;
 }
