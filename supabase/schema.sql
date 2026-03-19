@@ -344,7 +344,7 @@ create table if not exists public.platform_subscriptions (
   status text not null default 'active'
     check (status in ('active', 'canceled', 'expired', 'past_due')),
   max_tenants int not null default 5,
-  max_messages_mo int not null default 100000,
+  max_messages_mo int not null default 100,
   trial_ends_at timestamptz,
   current_period_start timestamptz not null default now(),
   current_period_end timestamptz not null default (now() + interval '30 days'),
@@ -358,6 +358,14 @@ alter table public.platform_subscriptions
   add column if not exists stripe_price_id text,
   add column if not exists cancel_at_period_end boolean not null default false;
 
+alter table public.platform_subscriptions
+  alter column max_messages_mo set default 100;
+
+update public.platform_subscriptions
+set max_messages_mo = 100
+where plan = 'trial'
+  and max_messages_mo <> 100;
+
 create unique index if not exists platform_subscriptions_user_idx
   on public.platform_subscriptions(user_id);
 
@@ -370,3 +378,38 @@ create trigger platform_subscriptions_set_updated_at
 before update on public.platform_subscriptions
 for each row
 execute procedure public.set_updated_at();
+
+-- ============================================================================
+-- PLATFORM ANALYTICS USAGE EVENTS
+-- ============================================================================
+
+create table if not exists public.platform_usage_events (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id text not null references public.tenants(tenant_id) on delete cascade,
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  device_id text not null,
+  user_message_id uuid references public.messages(id) on delete set null,
+  assistant_message_id uuid references public.messages(id) on delete set null,
+  intent text not null,
+  service text check (service in ('flights', 'hotels', 'cars', 'cruises')),
+  response_source text not null
+    check (response_source in ('llm', 'flight_engine', 'service_flow', 'static', 'fallback')),
+  rag_match boolean,
+  prompt_tokens int not null default 0,
+  completion_tokens int not null default 0,
+  total_tokens int not null default 0,
+  token_source text not null default 'none'
+    check (token_source in ('provider', 'counted', 'estimated', 'none')),
+  latency_ms int,
+  had_error boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists platform_usage_events_tenant_created_idx
+  on public.platform_usage_events (tenant_id, created_at desc);
+
+create index if not exists platform_usage_events_created_idx
+  on public.platform_usage_events (created_at desc);
+
+create index if not exists platform_usage_events_chat_created_idx
+  on public.platform_usage_events (chat_id, created_at desc);

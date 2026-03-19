@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { GoogleGenerativeAI, TaskType } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 
 type Status = "ok" | "warn" | "fail";
@@ -220,26 +220,31 @@ async function checkSupabaseSchema(args: Record<string, string>): Promise<CheckR
 
 async function checkGemini(): Promise<CheckResult> {
   try {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY ?? "");
+    const genAI = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY ?? ""
+    });
     const chatModelName = process.env.GEMINI_CHAT_MODEL || "gemini-2.5-flash";
     const embeddingModelName = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
 
-    const chatModel = genAI.getGenerativeModel({ model: chatModelName });
-    const chatResp = await chatModel.generateContent({
+    const chatResp = await genAI.models.generateContent({
+      model: chatModelName,
       contents: [{ role: "user", parts: [{ text: "Reply only with: OK" }] }]
     });
-    const chatText = chatResp.response.text().trim();
+    const chatText = (chatResp.text ?? "").trim();
     if (!chatText) {
       throw new Error(`Chat model '${chatModelName}' returned an empty response`);
     }
 
-    const embeddingModel = genAI.getGenerativeModel({ model: embeddingModelName });
-    const embedResp = await embeddingModel.embedContent({
-      content: { role: "user", parts: [{ text: "doctor check" }] },
-      taskType: TaskType.RETRIEVAL_QUERY,
-      outputDimensionality: 768
-    } as any);
-    if (!Array.isArray(embedResp.embedding?.values) || embedResp.embedding.values.length !== 768) {
+    const embedResp = await genAI.models.embedContent({
+      model: embeddingModelName,
+      contents: [{ role: "user", parts: [{ text: "doctor check" }] }],
+      config: {
+        taskType: "RETRIEVAL_QUERY",
+        outputDimensionality: 768
+      }
+    });
+    const firstEmbedding = embedResp.embeddings?.[0]?.values;
+    if (!Array.isArray(firstEmbedding) || firstEmbedding.length !== 768) {
       throw new Error(`Embedding model '${embeddingModelName}' did not return 768 dimensions`);
     }
 

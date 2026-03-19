@@ -12,7 +12,7 @@
     "ingest": "tsx scripts/ingest.ts"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^1.46.0",
     "@supabase/supabase-js": "^2.57.0",
     "@upstash/ratelimit": "^2.0.6",
     "@upstash/redis": "^1.35.6",

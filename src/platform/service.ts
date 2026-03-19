@@ -15,11 +15,16 @@ import {
   getDomainVerification,
   getSubscriptionByStripeSubscriptionId,
   getSubscriptionByUserId,
+  getPlatformUsageTrackingStartedAt,
   listTenantSources,
+  listPlatformAnalyticsMessages,
+  listPlatformUsageEvents,
   listUserTenants,
   replaceTenantSources,
   resolvePlatformSession,
   syncSubscriptionFromStripe,
+  type PlatformAnalyticsMessageRow,
+  type PlatformAnalyticsUsageRow,
   type SubscriptionSummary,
   type SupportedService,
   type TenantBusinessProfile,
@@ -640,25 +645,49 @@ export async function createSubscriptionCheckout(input: {
     previous_subscription_id: previousSubscriptionId ?? ""
   };
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    client_reference_id: user.id,
-    success_url: urls.success_url,
-    cancel_url: urls.cancel_url,
-    line_items: [
-      {
-        price: getStripePriceId(input.plan),
-        quantity: 1
-      }
-    ],
-    metadata,
-    subscription_data: {
-      metadata
-    },
-    ...(subscription.stripe_customer_id
-      ? { customer: subscription.stripe_customer_id }
-      : { customer_email: user.email })
-  });
+  const priceId = getStripePriceId(input.plan);
+  const envKey = input.plan === "starter" ? "STRIPE_PRICE_STARTER" : "STRIPE_PRICE_GROWTH";
+
+  let session: Stripe.Checkout.Session;
+  try {
+    session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      client_reference_id: user.id,
+      success_url: urls.success_url,
+      cancel_url: urls.cancel_url,
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1
+        }
+      ],
+      metadata,
+      subscription_data: {
+        metadata
+      },
+      ...(subscription.stripe_customer_id
+        ? { customer: subscription.stripe_customer_id }
+        : { customer_email: user.email })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Stripe Checkout session creation failed";
+    const code =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : null;
+
+    if (code === "resource_missing" && message.includes(`No such price: '${priceId}'`)) {
+      throw new HttpError(
+        500,
+        `${envKey} is set to ${priceId}, but Stripe cannot find that price for the active STRIPE_SECRET_KEY. If this request is hitting a deployed backend, update the backend environment variables so STRIPE_SECRET_KEY and ${envKey} come from the same Stripe account, then redeploy.`
+      );
+    }
+
+    throw error;
+  }
 
   if (!session.url) {
     throw new HttpError(500, "Stripe Checkout session did not return a hosted URL");
@@ -800,6 +829,617 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
     default:
       return { handled: false, reason: "ignored_event_type" as const };
   }
+}
+
+export type PlatformAnalyticsRange = "7d" | "30d" | "billing_cycle";
+
+export type PlatformAnalyticsSummary = {
+  conversations: number;
+  messages_total: number;
+  user_messages: number;
+  assistant_messages: number;
+  unique_visitors: number;
+  tokens_total: number;
+  tokens_exact: number;
+  tokens_estimated: number;
+  avg_response_ms: number | null;
+  message_quota_used: number;
+  message_quota_limit: number;
+};
+
+export type PlatformAnalyticsPoint = {
+  bucket_start: string;
+  conversations: number;
+  messages_total: number;
+  unique_visitors: number;
+  tokens_total: number;
+};
+
+export type PlatformAnalyticsWorkspaceRow = {
+  tenant_id: string;
+  name: string;
+  messages_total: number;
+  tokens_total: number;
+  conversations: number;
+  unique_visitors: number;
+};
+
+export type PlatformAnalyticsBreakdownRow = {
+  key: string;
+  label: string;
+  value: number;
+  share: number;
+};
+
+export type PlatformAnalyticsTokenSourceRow = {
+  key: "provider" | "counted" | "estimated" | "none";
+  label: string;
+  value: number;
+  share: number;
+};
+
+export type PlatformAnalyticsHealth = {
+  workspaces_total: number;
+  dns_verified_count: number;
+  knowledge_ready_count: number;
+  widget_ready_count: number;
+};
+
+export type PlatformAnalyticsScope = {
+  summary: PlatformAnalyticsSummary;
+  trend: PlatformAnalyticsPoint[];
+  services: PlatformAnalyticsBreakdownRow[];
+  intents: PlatformAnalyticsBreakdownRow[];
+  token_sources: PlatformAnalyticsTokenSourceRow[];
+  knowledge_hit_rate: number | null;
+  avg_response_ms: number | null;
+};
+
+export type PlatformAnalyticsResponse = {
+  range: PlatformAnalyticsRange;
+  timezone: string;
+  generated_at: string;
+  token_tracking_started_at: string | null;
+  account: PlatformAnalyticsScope & {
+    workspaces: PlatformAnalyticsWorkspaceRow[];
+    health: PlatformAnalyticsHealth;
+  };
+  workspace:
+    | (PlatformAnalyticsScope & {
+        tenant_id: string;
+        name: string;
+      })
+    | null;
+};
+
+const ANALYTICS_CACHE_TTL_MS = 60_000;
+const ANALYTICS_QUERY_PADDING_MS = 36 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const dateFormatterCache = new Map<string, Intl.DateTimeFormat>();
+const analyticsCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    value: PlatformAnalyticsResponse;
+  }
+>();
+
+function getDateFormatter(timezone: string) {
+  const cached = dateFormatterCache.get(timezone);
+  if (cached) {
+    return cached;
+  }
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  dateFormatterCache.set(timezone, formatter);
+  return formatter;
+}
+
+function normalizeAnalyticsTimezone(input?: string) {
+  const value = input?.trim();
+  if (!value) {
+    return "UTC";
+  }
+
+  try {
+    getDateFormatter(value).format(new Date());
+    return value;
+  } catch {
+    return "UTC";
+  }
+}
+
+function toDateKey(input: string | Date, timezone: string) {
+  const date = input instanceof Date ? input : new Date(input);
+  const parts = getDateFormatter(timezone).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value ?? "0000";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysToDateKey(dateKey: string, days: number) {
+  const date = new Date(`${dateKey}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function buildDateKeyRange(startKey: string, endKey: string) {
+  const keys: string[] = [];
+  let cursor = startKey;
+  while (cursor <= endKey) {
+    keys.push(cursor);
+    cursor = addDaysToDateKey(cursor, 1);
+  }
+  return keys;
+}
+
+function formatLabel(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function buildBreakdownRows(
+  counts: Map<string, number>,
+  labelBuilder: (key: string) => string
+): PlatformAnalyticsBreakdownRow[] {
+  const total = Array.from(counts.values()).reduce((sum, value) => sum + value, 0);
+  return Array.from(counts.entries())
+    .filter(([, value]) => value > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([key, value]) => ({
+      key,
+      label: labelBuilder(key),
+      value,
+      share: total > 0 ? value / total : 0
+    }));
+}
+
+function buildTokenSourceRows(
+  counts: Map<"provider" | "counted" | "estimated" | "none", number>
+): PlatformAnalyticsTokenSourceRow[] {
+  const orderedKeys: Array<"provider" | "counted" | "estimated" | "none"> = [
+    "provider",
+    "counted",
+    "estimated",
+    "none"
+  ];
+  const total = orderedKeys.reduce((sum, key) => sum + (counts.get(key) ?? 0), 0);
+
+  return orderedKeys.map((key) => ({
+    key,
+    label: formatLabel(key),
+    value: counts.get(key) ?? 0,
+    share: total > 0 ? (counts.get(key) ?? 0) / total : 0
+  }));
+}
+
+function filterMessagesByDateRange(
+  rows: PlatformAnalyticsMessageRow[],
+  timezone: string,
+  startKey: string,
+  endKey: string
+) {
+  return rows.filter((row) => {
+    const dateKey = toDateKey(row.created_at, timezone);
+    return dateKey >= startKey && dateKey <= endKey;
+  });
+}
+
+function filterUsageEventsByDateRange(
+  rows: PlatformAnalyticsUsageRow[],
+  timezone: string,
+  startKey: string,
+  endKey: string
+) {
+  return rows.filter((row) => {
+    const dateKey = toDateKey(row.created_at, timezone);
+    return dateKey >= startKey && dateKey <= endKey;
+  });
+}
+
+function buildWorkspaceRows(input: {
+  tenantMap: Map<string, TenantSummary>;
+  messages: PlatformAnalyticsMessageRow[];
+  usageEvents: PlatformAnalyticsUsageRow[];
+}): PlatformAnalyticsWorkspaceRow[] {
+  const usageByTenant = new Map<
+    string,
+    {
+      messages_total: number;
+      tokens_total: number;
+      conversations: Set<string>;
+      unique_visitors: Set<string>;
+    }
+  >();
+
+  for (const row of input.messages) {
+    let summary = usageByTenant.get(row.tenant_id);
+    if (!summary) {
+      summary = {
+        messages_total: 0,
+        tokens_total: 0,
+        conversations: new Set<string>(),
+        unique_visitors: new Set<string>()
+      };
+      usageByTenant.set(row.tenant_id, summary);
+    }
+
+    summary.messages_total += 1;
+    if (row.role === "user") {
+      summary.conversations.add(row.chat_id);
+      summary.unique_visitors.add(row.device_id);
+    }
+  }
+
+  for (const row of input.usageEvents) {
+    let summary = usageByTenant.get(row.tenant_id);
+    if (!summary) {
+      summary = {
+        messages_total: 0,
+        tokens_total: 0,
+        conversations: new Set<string>(),
+        unique_visitors: new Set<string>()
+      };
+      usageByTenant.set(row.tenant_id, summary);
+    }
+
+    summary.tokens_total += row.total_tokens ?? 0;
+  }
+
+  return Array.from(usageByTenant.entries())
+    .map(([tenantId, summary]) => {
+      const tenant = input.tenantMap.get(tenantId);
+      return {
+        tenant_id: tenantId,
+        name: tenant?.name?.trim() || tenant?.business_profile.bot_name || tenantId,
+        messages_total: summary.messages_total,
+        tokens_total: summary.tokens_total,
+        conversations: summary.conversations.size,
+        unique_visitors: summary.unique_visitors.size
+      };
+    })
+    .filter((row) => row.messages_total > 0 || row.tokens_total > 0)
+    .sort(
+      (left, right) =>
+        right.messages_total - left.messages_total ||
+        right.tokens_total - left.tokens_total ||
+        left.name.localeCompare(right.name)
+    );
+}
+
+function buildHealthSummary(tenants: TenantSummary[]): PlatformAnalyticsHealth {
+  const dnsVerifiedCount = tenants.filter(
+    (tenant) => tenant.domain_verification?.status === "verified"
+  ).length;
+  const knowledgeReadyCount = tenants.filter(
+    (tenant) =>
+      tenant.knowledge_base.status === "ready" || tenant.knowledge_base.status === "warning"
+  ).length;
+
+  return {
+    workspaces_total: tenants.length,
+    dns_verified_count: dnsVerifiedCount,
+    knowledge_ready_count: knowledgeReadyCount,
+    widget_ready_count: dnsVerifiedCount
+  };
+}
+
+function aggregateAnalyticsScope(input: {
+  messages: PlatformAnalyticsMessageRow[];
+  usageEvents: PlatformAnalyticsUsageRow[];
+  bucketKeys: string[];
+  timezone: string;
+  messageQuotaUsed: number;
+  messageQuotaLimit: number;
+}): PlatformAnalyticsScope {
+  const bucketMap = new Map<
+    string,
+    {
+      conversations: Set<string>;
+      uniqueVisitors: Set<string>;
+      messages_total: number;
+      tokens_total: number;
+    }
+  >();
+
+  for (const bucketKey of input.bucketKeys) {
+    bucketMap.set(bucketKey, {
+      conversations: new Set<string>(),
+      uniqueVisitors: new Set<string>(),
+      messages_total: 0,
+      tokens_total: 0
+    });
+  }
+
+  let userMessages = 0;
+  let assistantMessages = 0;
+  const conversations = new Set<string>();
+  const uniqueVisitors = new Set<string>();
+
+  for (const row of input.messages) {
+    const bucket = bucketMap.get(toDateKey(row.created_at, input.timezone));
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.messages_total += 1;
+    if (row.role === "user") {
+      userMessages += 1;
+      conversations.add(row.chat_id);
+      uniqueVisitors.add(row.device_id);
+      bucket.conversations.add(row.chat_id);
+      bucket.uniqueVisitors.add(row.device_id);
+    } else if (row.role === "assistant") {
+      assistantMessages += 1;
+    }
+  }
+
+  let tokensTotal = 0;
+  let tokensExact = 0;
+  let tokensEstimated = 0;
+  let latencySum = 0;
+  let latencyCount = 0;
+  const serviceCounts = new Map<string, number>();
+  const intentCounts = new Map<string, number>();
+  const tokenSourceCounts = new Map<"provider" | "counted" | "estimated" | "none", number>([
+    ["provider", 0],
+    ["counted", 0],
+    ["estimated", 0],
+    ["none", 0]
+  ]);
+  let knowledgeTotal = 0;
+  let knowledgeHits = 0;
+
+  for (const row of input.usageEvents) {
+    const totalTokens = row.total_tokens ?? 0;
+    tokensTotal += totalTokens;
+
+    if (row.token_source === "provider" || row.token_source === "counted") {
+      tokensExact += totalTokens;
+    } else if (row.token_source === "estimated") {
+      tokensEstimated += totalTokens;
+    }
+
+    tokenSourceCounts.set(row.token_source, (tokenSourceCounts.get(row.token_source) ?? 0) + totalTokens);
+
+    const bucket = bucketMap.get(toDateKey(row.created_at, input.timezone));
+    if (bucket) {
+      bucket.tokens_total += totalTokens;
+    }
+
+    if (typeof row.latency_ms === "number" && Number.isFinite(row.latency_ms)) {
+      latencySum += row.latency_ms;
+      latencyCount += 1;
+    }
+
+    const serviceKey = row.service?.trim() || "general";
+    serviceCounts.set(serviceKey, (serviceCounts.get(serviceKey) ?? 0) + 1);
+    intentCounts.set(row.intent, (intentCounts.get(row.intent) ?? 0) + 1);
+
+    if (row.intent === "knowledge" && row.rag_match !== null) {
+      knowledgeTotal += 1;
+      if (row.rag_match) {
+        knowledgeHits += 1;
+      }
+    }
+  }
+
+  const avgResponseMs = latencyCount > 0 ? Math.round(latencySum / latencyCount) : null;
+  const trend = input.bucketKeys.map((bucketKey) => {
+    const bucket = bucketMap.get(bucketKey);
+    return {
+      bucket_start: bucketKey,
+      conversations: bucket?.conversations.size ?? 0,
+      messages_total: bucket?.messages_total ?? 0,
+      unique_visitors: bucket?.uniqueVisitors.size ?? 0,
+      tokens_total: bucket?.tokens_total ?? 0
+    };
+  });
+
+  return {
+    summary: {
+      conversations: conversations.size,
+      messages_total: input.messages.length,
+      user_messages: userMessages,
+      assistant_messages: assistantMessages,
+      unique_visitors: uniqueVisitors.size,
+      tokens_total: tokensTotal,
+      tokens_exact: tokensExact,
+      tokens_estimated: tokensEstimated,
+      avg_response_ms: avgResponseMs,
+      message_quota_used: input.messageQuotaUsed,
+      message_quota_limit: input.messageQuotaLimit
+    },
+    trend,
+    services: buildBreakdownRows(serviceCounts, (key) => formatLabel(key)),
+    intents: buildBreakdownRows(intentCounts, (key) => formatLabel(key)),
+    token_sources: buildTokenSourceRows(tokenSourceCounts),
+    knowledge_hit_rate: knowledgeTotal > 0 ? knowledgeHits / knowledgeTotal : null,
+    avg_response_ms: avgResponseMs
+  };
+}
+
+function getCachedAnalytics(key: string) {
+  const cached = analyticsCache.get(key);
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    analyticsCache.delete(key);
+    return null;
+  }
+
+  return cached.value;
+}
+
+function setCachedAnalytics(key: string, value: PlatformAnalyticsResponse) {
+  analyticsCache.set(key, {
+    expiresAt: Date.now() + ANALYTICS_CACHE_TTL_MS,
+    value
+  });
+}
+
+function getAnalyticsDateRange(
+  range: PlatformAnalyticsRange,
+  subscription: SubscriptionSummary,
+  timezone: string
+) {
+  const now = new Date();
+  const endAt = now.toISOString();
+  const endKey = toDateKey(now, timezone);
+
+  if (range === "billing_cycle") {
+    const currentPeriodStart = new Date(subscription.current_period_start);
+    const startKey = toDateKey(currentPeriodStart, timezone);
+    return {
+      queryStartAt: new Date(currentPeriodStart.getTime() - ANALYTICS_QUERY_PADDING_MS).toISOString(),
+      endAt,
+      startKey,
+      endKey,
+      bucketKeys: buildDateKeyRange(startKey, endKey)
+    };
+  }
+
+  const lookbackDays = range === "30d" ? 29 : 6;
+  const paddedStart = new Date(now.getTime() - (lookbackDays + 2) * DAY_MS);
+  const startKey = toDateKey(new Date(now.getTime() - lookbackDays * DAY_MS), timezone);
+
+  return {
+    queryStartAt: paddedStart.toISOString(),
+    endAt,
+    startKey,
+    endKey,
+    bucketKeys: buildDateKeyRange(startKey, endKey)
+  };
+}
+
+export async function getPlatformAnalytics(input: {
+  token: string;
+  range: PlatformAnalyticsRange;
+  tenant_id?: string;
+  timezone?: string;
+}): Promise<PlatformAnalyticsResponse> {
+  const user = await resolvePlatformSession(input.token);
+  const timezone = normalizeAnalyticsTimezone(input.timezone);
+  const cacheKey = `${user.id}:${input.tenant_id ?? "all"}:${input.range}:${timezone}`;
+  const cached = getCachedAnalytics(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const [subscription, tenants] = await Promise.all([
+    ensureUserSubscription(user.id),
+    listUserTenants(user.id)
+  ]);
+  const tenantMap = new Map(tenants.map((tenant) => [tenant.tenant_id, tenant]));
+  const selectedTenant = input.tenant_id ? tenantMap.get(input.tenant_id) ?? null : null;
+
+  if (input.tenant_id && !selectedTenant) {
+    throw new HttpError(404, "Tenant not found");
+  }
+
+  const ownedTenantIds = tenants.map((tenant) => tenant.tenant_id);
+  const rangeWindow = getAnalyticsDateRange(input.range, subscription, timezone);
+
+  const [rangeMessages, rangeUsageEvents, currentPeriodMessages, tokenTrackingStartedAt] =
+    await Promise.all([
+      listPlatformAnalyticsMessages({
+        tenant_ids: ownedTenantIds,
+        start_at: rangeWindow.queryStartAt,
+        end_at: rangeWindow.endAt
+      }),
+      listPlatformUsageEvents({
+        tenant_ids: ownedTenantIds,
+        start_at: rangeWindow.queryStartAt,
+        end_at: rangeWindow.endAt
+      }),
+      listPlatformAnalyticsMessages({
+        tenant_ids: ownedTenantIds,
+        start_at: subscription.current_period_start,
+        end_at: rangeWindow.endAt
+      }),
+      getPlatformUsageTrackingStartedAt(ownedTenantIds)
+    ]);
+  const currentPeriodUserMessageCount = currentPeriodMessages.filter((row) => row.role === "user").length;
+
+  const filteredRangeMessages = filterMessagesByDateRange(
+    rangeMessages,
+    timezone,
+    rangeWindow.startKey,
+    rangeWindow.endKey
+  );
+  const filteredRangeUsageEvents = filterUsageEventsByDateRange(
+    rangeUsageEvents,
+    timezone,
+    rangeWindow.startKey,
+    rangeWindow.endKey
+  );
+
+  const accountScope = aggregateAnalyticsScope({
+    messages: filteredRangeMessages,
+    usageEvents: filteredRangeUsageEvents,
+    bucketKeys: rangeWindow.bucketKeys,
+    timezone,
+    messageQuotaUsed: currentPeriodUserMessageCount,
+    messageQuotaLimit: subscription.max_messages_mo
+  });
+
+  const workspaceMessages = selectedTenant
+    ? filteredRangeMessages.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+  const workspaceUsageEvents = selectedTenant
+    ? filteredRangeUsageEvents.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+  const workspaceCurrentPeriodMessages = selectedTenant
+    ? currentPeriodMessages.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+  const workspaceCurrentPeriodUserMessages = workspaceCurrentPeriodMessages.filter(
+    (row) => row.role === "user"
+  );
+
+  const response: PlatformAnalyticsResponse = {
+    range: input.range,
+    timezone,
+    generated_at: new Date().toISOString(),
+    token_tracking_started_at: tokenTrackingStartedAt,
+    account: {
+      ...accountScope,
+      workspaces: buildWorkspaceRows({
+        tenantMap,
+        messages: filteredRangeMessages,
+        usageEvents: filteredRangeUsageEvents
+      }),
+      health: buildHealthSummary(tenants)
+    },
+    workspace: selectedTenant
+      ? {
+          tenant_id: selectedTenant.tenant_id,
+          name:
+            selectedTenant.name?.trim() ||
+            selectedTenant.business_profile.bot_name ||
+            selectedTenant.tenant_id,
+          ...aggregateAnalyticsScope({
+            messages: workspaceMessages,
+            usageEvents: workspaceUsageEvents,
+            bucketKeys: rangeWindow.bucketKeys,
+            timezone,
+            messageQuotaUsed: workspaceCurrentPeriodUserMessages.length,
+            messageQuotaLimit: subscription.max_messages_mo
+          })
+        }
+      : null
+  };
+
+  setCachedAnalytics(cacheKey, response);
+  return response;
 }
 
 export async function enforcePlanLimits(userId: string, action: "create_tenant") {

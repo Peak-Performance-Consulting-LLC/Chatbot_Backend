@@ -63,7 +63,9 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column platform_subscriptions.stripe_customer_id does not exist") ||
     message.includes("column platform_subscriptions.stripe_subscription_id does not exist") ||
     message.includes("column platform_subscriptions.stripe_price_id does not exist") ||
-    message.includes("column platform_subscriptions.cancel_at_period_end does not exist")
+    message.includes("column platform_subscriptions.cancel_at_period_end does not exist") ||
+    message.includes("Could not find the table 'public.platform_usage_events'") ||
+    message.includes('relation "public.platform_usage_events" does not exist')
   );
 }
 
@@ -1626,7 +1628,7 @@ export type SubscriptionSummary = {
 };
 
 const PLAN_LIMITS: Record<SubscriptionPlan, { max_tenants: number; max_messages_mo: number }> = {
-  trial: { max_tenants: 5, max_messages_mo: 100_000 },
+  trial: { max_tenants: 5, max_messages_mo: 100 },
   starter: { max_tenants: 1, max_messages_mo: 10_000 },
   growth: { max_tenants: 5, max_messages_mo: 100_000 },
   enterprise: { max_tenants: 999, max_messages_mo: 1_000_000 }
@@ -1728,17 +1730,34 @@ export async function getSubscriptionByUserId(userId: string): Promise<Subscript
   }
 
   const row = data as SubscriptionRow;
+  const plan = normalizeSubscriptionPlan(row.plan);
+  const status = normalizeSubscriptionStatus(row.status);
+  const payload: Partial<SubscriptionRow> = {};
+
+  if (plan === "trial") {
+    const limits = PLAN_LIMITS.trial;
+    if (row.max_tenants !== limits.max_tenants) {
+      payload.max_tenants = limits.max_tenants;
+    }
+    if (row.max_messages_mo !== limits.max_messages_mo) {
+      payload.max_messages_mo = limits.max_messages_mo;
+    }
+  }
 
   // Auto-expire trial if past trial_ends_at
   if (
-    normalizeSubscriptionPlan(row.plan) === "trial" &&
-    normalizeSubscriptionStatus(row.status) === "active" &&
+    plan === "trial" &&
+    status === "active" &&
     row.trial_ends_at &&
     new Date(row.trial_ends_at).getTime() < Date.now()
   ) {
+    payload.status = "expired";
+  }
+
+  if (Object.keys(payload).length > 0) {
     const { data: updated, error: updateError } = await supabaseAdmin
       .from("platform_subscriptions")
-      .update({ status: "expired" })
+      .update(payload)
       .eq("id", row.id)
       .select("*")
       .single();
@@ -1946,4 +1965,326 @@ export async function updateSubscriptionPlan(
 
 export function getPlanLimits(plan: SubscriptionPlan) {
   return PLAN_LIMITS[plan] ?? PLAN_LIMITS.trial;
+}
+
+// ============================================================================
+// ANALYTICS
+// ============================================================================
+
+const ANALYTICS_PAGE_SIZE = 1000;
+
+export type PlatformUsageEventResponseSource =
+  | "llm"
+  | "flight_engine"
+  | "service_flow"
+  | "static"
+  | "fallback";
+
+export type PlatformUsageEventTokenSource = "provider" | "counted" | "estimated" | "none";
+
+type PlatformUsageEventRow = {
+  id: string;
+  tenant_id: string;
+  chat_id: string;
+  device_id: string;
+  user_message_id: string | null;
+  assistant_message_id: string | null;
+  intent: string;
+  service: string | null;
+  response_source: PlatformUsageEventResponseSource;
+  rag_match: boolean | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  token_source: PlatformUsageEventTokenSource;
+  latency_ms: number | null;
+  had_error: boolean;
+  created_at: string;
+};
+
+type PlatformAnalyticsJoinedChat = {
+  tenant_id: string;
+  device_id: string;
+};
+
+type PlatformAnalyticsMessageSelectRow = {
+  chat_id: string;
+  role: "user" | "assistant" | "system";
+  created_at: string;
+  chats: PlatformAnalyticsJoinedChat | PlatformAnalyticsJoinedChat[] | null;
+};
+
+export type PlatformAnalyticsMessageRow = {
+  chat_id: string;
+  role: "user" | "assistant";
+  created_at: string;
+  tenant_id: string;
+  device_id: string;
+};
+
+export type PlatformAnalyticsUsageRow = PlatformUsageEventRow;
+
+export type TenantSubscriptionUsageSnapshot = {
+  user_id: string;
+  subscription: SubscriptionSummary;
+  owned_tenant_ids: string[];
+  current_period_user_messages: number;
+};
+
+function normalizeJoinedChat(
+  joined: PlatformAnalyticsJoinedChat | PlatformAnalyticsJoinedChat[] | null | undefined
+): PlatformAnalyticsJoinedChat | null {
+  if (!joined) {
+    return null;
+  }
+
+  return Array.isArray(joined) ? joined[0] ?? null : joined;
+}
+
+export async function insertPlatformUsageEvent(input: {
+  tenant_id: string;
+  chat_id: string;
+  device_id: string;
+  user_message_id?: string | null;
+  assistant_message_id?: string | null;
+  intent: string;
+  service?: string | null;
+  response_source: PlatformUsageEventResponseSource;
+  rag_match?: boolean | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  token_source: PlatformUsageEventTokenSource;
+  latency_ms?: number | null;
+  had_error?: boolean;
+}): Promise<void> {
+  const { error } = await supabaseAdmin.from("platform_usage_events").insert({
+    tenant_id: input.tenant_id,
+    chat_id: input.chat_id,
+    device_id: input.device_id,
+    user_message_id: input.user_message_id ?? null,
+    assistant_message_id: input.assistant_message_id ?? null,
+    intent: input.intent,
+    service: input.service ?? null,
+    response_source: input.response_source,
+    rag_match: input.rag_match ?? null,
+    prompt_tokens: input.prompt_tokens ?? 0,
+    completion_tokens: input.completion_tokens ?? 0,
+    total_tokens: input.total_tokens ?? 0,
+    token_source: input.token_source,
+    latency_ms: input.latency_ms ?? null,
+    had_error: input.had_error ?? false
+  });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to insert usage event: ${error.message}`);
+  }
+}
+
+export async function listUserTenantIds(userId: string): Promise<string[]> {
+  const { data, error } = await supabaseAdmin
+    .from("platform_user_tenants")
+    .select("tenant_id")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load user tenant ids: ${error.message}`);
+  }
+
+  return ((data ?? []) as Array<{ tenant_id: string | null }>)
+    .map((row) => row.tenant_id?.trim() ?? "")
+    .filter(Boolean);
+}
+
+export async function getPrimaryPlatformUserIdForTenant(tenantId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin
+    .from("platform_user_tenants")
+    .select("user_id")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load tenant owner: ${error.message}`);
+  }
+
+  return (data as { user_id?: string | null } | null)?.user_id?.trim() ?? null;
+}
+
+export async function countPlatformMessagesInRange(input: {
+  tenant_ids: string[];
+  start_at: string;
+  end_at: string;
+  role?: "user" | "assistant" | "system";
+}): Promise<number> {
+  if (input.tenant_ids.length === 0) {
+    return 0;
+  }
+
+  let query = supabaseAdmin
+    .from("messages")
+    .select("id, chats!inner(tenant_id)", { count: "exact", head: true })
+    .in("chats.tenant_id", input.tenant_ids)
+    .gte("created_at", input.start_at)
+    .lte("created_at", input.end_at);
+
+  query = input.role ? query.eq("role", input.role) : query.neq("role", "system");
+
+  const { count, error } = await query;
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to count platform messages: ${error.message}`);
+  }
+
+  return count ?? 0;
+}
+
+export async function getTenantSubscriptionUsageSnapshot(
+  tenantId: string
+): Promise<TenantSubscriptionUsageSnapshot | null> {
+  const userId = await getPrimaryPlatformUserIdForTenant(tenantId);
+  if (!userId) {
+    return null;
+  }
+
+  const [subscription, ownedTenantIds] = await Promise.all([
+    getSubscriptionByUserId(userId),
+    listUserTenantIds(userId)
+  ]);
+
+  if (!subscription) {
+    return null;
+  }
+
+  const currentPeriodUserMessages = await countPlatformMessagesInRange({
+    tenant_ids: ownedTenantIds,
+    start_at: subscription.current_period_start,
+    end_at: new Date().toISOString(),
+    role: "user"
+  });
+
+  return {
+    user_id: userId,
+    subscription,
+    owned_tenant_ids: ownedTenantIds,
+    current_period_user_messages: currentPeriodUserMessages
+  };
+}
+
+export async function listPlatformAnalyticsMessages(input: {
+  tenant_ids: string[];
+  start_at: string;
+  end_at: string;
+}): Promise<PlatformAnalyticsMessageRow[]> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const rows: PlatformAnalyticsMessageRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("messages")
+      .select("chat_id, role, created_at, chats!inner(tenant_id, device_id)")
+      .in("chats.tenant_id", input.tenant_ids)
+      .gte("created_at", input.start_at)
+      .lte("created_at", input.end_at)
+      .neq("role", "system")
+      .order("created_at", { ascending: true })
+      .range(from, from + ANALYTICS_PAGE_SIZE - 1);
+
+    if (error) {
+      throwPlatformSchemaMissingError(`Failed to load analytics messages: ${error.message}`);
+    }
+
+    const page = (data ?? []) as PlatformAnalyticsMessageSelectRow[];
+    for (const row of page) {
+      const joinedChat = normalizeJoinedChat(row.chats);
+      if (!joinedChat || (row.role !== "user" && row.role !== "assistant")) {
+        continue;
+      }
+
+      rows.push({
+        chat_id: row.chat_id,
+        role: row.role,
+        created_at: row.created_at,
+        tenant_id: joinedChat.tenant_id,
+        device_id: joinedChat.device_id
+      });
+    }
+
+    if (page.length < ANALYTICS_PAGE_SIZE) {
+      break;
+    }
+
+    from += ANALYTICS_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+export async function listPlatformUsageEvents(input: {
+  tenant_ids: string[];
+  start_at: string;
+  end_at: string;
+}): Promise<PlatformAnalyticsUsageRow[]> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const rows: PlatformAnalyticsUsageRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("platform_usage_events")
+      .select(
+        "id, tenant_id, chat_id, device_id, user_message_id, assistant_message_id, intent, service, response_source, rag_match, prompt_tokens, completion_tokens, total_tokens, token_source, latency_ms, had_error, created_at"
+      )
+      .in("tenant_id", input.tenant_ids)
+      .gte("created_at", input.start_at)
+      .lte("created_at", input.end_at)
+      .order("created_at", { ascending: true })
+      .range(from, from + ANALYTICS_PAGE_SIZE - 1);
+
+    if (error) {
+      throwPlatformSchemaMissingError(`Failed to load usage events: ${error.message}`);
+    }
+
+    const page = (data ?? []) as PlatformUsageEventRow[];
+    rows.push(...page);
+
+    if (page.length < ANALYTICS_PAGE_SIZE) {
+      break;
+    }
+
+    from += ANALYTICS_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+export async function getPlatformUsageTrackingStartedAt(
+  tenantIds: string[]
+): Promise<string | null> {
+  if (tenantIds.length === 0) {
+    return null;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("platform_usage_events")
+    .select("created_at")
+    .in("tenant_id", tenantIds)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load usage tracking start: ${error.message}`);
+  }
+
+  return (data as { created_at?: string } | null)?.created_at ?? null;
 }

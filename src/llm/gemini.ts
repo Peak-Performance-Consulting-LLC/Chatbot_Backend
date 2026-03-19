@@ -1,7 +1,7 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import { assertEnvVars, getEnv } from "@/config/env";
 
-let genAI: GoogleGenerativeAI | null = null;
+let genAI: GoogleGenAI | null = null;
 const EMBEDDING_CACHE_TTL_MS = 30 * 60 * 1000;
 const EMBEDDING_CACHE_MAX_ENTRIES = 500;
 const embeddingCache = new Map<string, { values: number[]; expiresAt: number }>();
@@ -9,6 +9,36 @@ const embeddingCache = new Map<string, { values: number[]; expiresAt: number }>(
 type GeminiRequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
+};
+
+type GeminiContentPart = {
+  text: string;
+};
+
+type GeminiContent = {
+  role: "user" | "model";
+  parts: GeminiContentPart[];
+};
+
+export type GeminiUsageSource = "provider" | "counted" | "estimated" | "none";
+
+export type GeminiUsageSummary = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  source: GeminiUsageSource;
+};
+
+export type GeminiTextResult = {
+  text: string;
+  usage: GeminiUsageSummary;
+};
+
+const ZERO_USAGE: GeminiUsageSummary = {
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  source: "none"
 };
 
 function normalizeCacheKey(input: string) {
@@ -40,7 +70,9 @@ function getGeminiClient() {
   }
 
   assertEnvVars(["GEMINI_API_KEY"]);
-  genAI = new GoogleGenerativeAI(getEnv().GEMINI_API_KEY);
+  genAI = new GoogleGenAI({
+    apiKey: getEnv().GEMINI_API_KEY
+  });
   return genAI;
 }
 
@@ -52,14 +84,21 @@ function getEmbeddingModelName(): string {
   return getEnv().GEMINI_EMBEDDING_MODEL;
 }
 
-function toGeminiRequestOptions(input?: GeminiRequestOptions) {
-  if (!input?.signal && typeof input?.timeoutMs !== "number") {
+function toGeminiConfig(systemPrompt?: string, input?: GeminiRequestOptions) {
+  if (!systemPrompt && !input?.signal && typeof input?.timeoutMs !== "number") {
     return undefined;
   }
 
   return {
-    ...(input?.signal ? { signal: input.signal } : {}),
-    ...(typeof input?.timeoutMs === "number" ? { timeout: input.timeoutMs } : {})
+    ...(systemPrompt ? { systemInstruction: systemPrompt } : {}),
+    ...(input?.signal ? { abortSignal: input.signal } : {}),
+    ...(typeof input?.timeoutMs === "number"
+      ? {
+          httpOptions: {
+            timeout: input.timeoutMs
+          }
+        }
+      : {})
   };
 }
 
@@ -124,7 +163,7 @@ function mapHistory(history: HistoryTurn[]) {
   return history.map((item) => ({
     role: item.role === "assistant" ? "model" : "user",
     parts: [{ text: item.content }]
-  }));
+  })) satisfies GeminiContent[];
 }
 
 type GeminiChatInput = {
@@ -149,6 +188,154 @@ function buildUserPrompt(input: GeminiChatInput): string {
   return `${contextBlock}\n\n${pageBlock}\n\nUser request:\n${input.userMessage}`;
 }
 
+function buildGeminiContents(input: GeminiChatInput): GeminiContent[] {
+  return [
+    ...mapHistory(input.history),
+    {
+      role: "user",
+      parts: [{ text: buildUserPrompt(input) }]
+    }
+  ];
+}
+
+function buildPlainTextContents(prompt: string): GeminiContent[] {
+  return [
+    {
+      role: "user",
+      parts: [{ text: prompt }]
+    }
+  ];
+}
+
+function normalizeTokenCount(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.round(value));
+}
+
+function usageFromProvider(metadata: {
+  promptTokenCount?: number | null;
+  candidatesTokenCount?: number | null;
+  totalTokenCount?: number | null;
+} | null | undefined): GeminiUsageSummary | null {
+  if (!metadata) {
+    return null;
+  }
+
+  const promptTokens = normalizeTokenCount(metadata.promptTokenCount);
+  const completionTokens = normalizeTokenCount(metadata.candidatesTokenCount);
+  const totalTokens = normalizeTokenCount(metadata.totalTokenCount);
+
+  if (promptTokens === null && completionTokens === null && totalTokens === null) {
+    return null;
+  }
+
+  const resolvedPromptTokens = promptTokens ?? 0;
+  const resolvedCompletionTokens = completionTokens ?? 0;
+
+  return {
+    promptTokens: resolvedPromptTokens,
+    completionTokens: resolvedCompletionTokens,
+    totalTokens: totalTokens ?? resolvedPromptTokens + resolvedCompletionTokens,
+    source: "provider"
+  };
+}
+
+function estimateTokensForText(text: string) {
+  const normalized = text.trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function estimateTokensForContents(contents: GeminiContent[]) {
+  return contents.reduce(
+    (sum, item) =>
+      sum +
+      item.parts.reduce((partSum, part) => partSum + estimateTokensForText(part.text), 0),
+    0
+  );
+}
+
+async function countTokensForContents(
+  contents: GeminiContent[],
+  systemPrompt?: string,
+  options?: GeminiRequestOptions
+) {
+  try {
+    const result = await getGeminiClient().models.countTokens({
+      model: getChatModelName(),
+      contents,
+      config: toGeminiConfig(systemPrompt, options)
+    });
+
+    return normalizeTokenCount(result.totalTokens);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveUsageSummary(input: {
+  contents: GeminiContent[];
+  responseText: string;
+  providerUsage?: {
+    promptTokenCount?: number | null;
+    candidatesTokenCount?: number | null;
+    totalTokenCount?: number | null;
+  } | null;
+  systemPrompt?: string;
+  options?: GeminiRequestOptions;
+}): Promise<GeminiUsageSummary> {
+  const providerUsage = usageFromProvider(input.providerUsage);
+  if (providerUsage) {
+    return providerUsage;
+  }
+
+  const [countedPromptTokens, countedCompletionTokens] = await Promise.all([
+    countTokensForContents(input.contents, input.systemPrompt, input.options),
+    input.responseText.trim()
+      ? countTokensForContents(
+          [
+            {
+              role: "model",
+              parts: [{ text: input.responseText }]
+            }
+          ],
+          undefined,
+          input.options
+        )
+      : Promise.resolve(0)
+  ]);
+
+  if (countedPromptTokens !== null && countedCompletionTokens !== null) {
+    return {
+      promptTokens: countedPromptTokens,
+      completionTokens: countedCompletionTokens,
+      totalTokens: countedPromptTokens + countedCompletionTokens,
+      source: "counted"
+    };
+  }
+
+  const estimatedPromptTokens = estimateTokensForContents(input.contents);
+  const estimatedCompletionTokens = estimateTokensForText(input.responseText);
+  const estimatedTotalTokens = estimatedPromptTokens + estimatedCompletionTokens;
+
+  if (estimatedTotalTokens === 0) {
+    return ZERO_USAGE;
+  }
+
+  return {
+    promptTokens: estimatedPromptTokens,
+    completionTokens: estimatedCompletionTokens,
+    totalTokens: estimatedTotalTokens,
+    source: "estimated"
+  };
+}
+
 export async function streamGeminiReply(input: {
   systemPrompt: string;
   retrievedContext: string;
@@ -158,76 +345,98 @@ export async function streamGeminiReply(input: {
   onToken: (token: string) => void;
   signal?: AbortSignal;
   timeoutMs?: number;
-}): Promise<string> {
-  const model = getGeminiClient().getGenerativeModel({
+}): Promise<GeminiTextResult> {
+  const contents = buildGeminiContents(input);
+  const response = await getGeminiClient().models.generateContentStream({
     model: getChatModelName(),
-    systemInstruction: input.systemPrompt
+    contents,
+    config: toGeminiConfig(input.systemPrompt, input)
   });
 
-  const userPrompt = buildUserPrompt(input);
-
-  const response = await model.generateContentStream({
-    contents: [
-      ...mapHistory(input.history),
-      {
-        role: "user",
-        parts: [{ text: userPrompt }]
-      }
-    ]
-  }, toGeminiRequestOptions(input));
-
   let fullText = "";
-  for await (const chunk of response.stream) {
-    const token = chunk.text();
+  let latestProviderUsage: {
+    promptTokenCount?: number | null;
+    candidatesTokenCount?: number | null;
+    totalTokenCount?: number | null;
+  } | null = null;
+
+  for await (const chunk of response) {
+    const token = chunk.text ?? "";
     if (!token) {
+      latestProviderUsage = chunk.usageMetadata ?? latestProviderUsage;
       continue;
     }
 
     fullText += token;
     input.onToken(token);
+    latestProviderUsage = chunk.usageMetadata ?? latestProviderUsage;
   }
 
-  return fullText.trim();
+  const text = fullText.trim();
+  const usage = await resolveUsageSummary({
+    contents,
+    responseText: text,
+    providerUsage: latestProviderUsage,
+    systemPrompt: input.systemPrompt,
+    options: input
+  });
+
+  return {
+    text,
+    usage
+  };
 }
 
 export async function generateGeminiReply(
   input: GeminiChatInput & GeminiRequestOptions
-): Promise<string> {
-  const model = getGeminiClient().getGenerativeModel({
+): Promise<GeminiTextResult> {
+  const contents = buildGeminiContents(input);
+  const response = await getGeminiClient().models.generateContent({
     model: getChatModelName(),
-    systemInstruction: input.systemPrompt
+    contents,
+    config: toGeminiConfig(input.systemPrompt, input)
   });
 
-  const userPrompt = buildUserPrompt(input);
+  const text = (response.text ?? "").trim();
+  const usage = await resolveUsageSummary({
+    contents,
+    responseText: text,
+    providerUsage: response.usageMetadata,
+    systemPrompt: input.systemPrompt,
+    options: input
+  });
 
-  const response = await model.generateContent({
-    contents: [
-      ...mapHistory(input.history),
-      {
-        role: "user",
-        parts: [{ text: userPrompt }]
-      }
-    ]
-  }, toGeminiRequestOptions(input));
-
-  return response.response.text().trim();
+  return {
+    text,
+    usage
+  };
 }
 
 export async function generateGeminiText(
   prompt: string,
   systemPrompt?: string,
   options?: GeminiRequestOptions
-): Promise<string> {
-  const model = getGeminiClient().getGenerativeModel({
+): Promise<GeminiTextResult> {
+  const contents = buildPlainTextContents(prompt);
+  const response = await getGeminiClient().models.generateContent({
     model: getChatModelName(),
-    ...(systemPrompt ? { systemInstruction: systemPrompt } : {})
+    contents,
+    config: toGeminiConfig(systemPrompt, options)
   });
 
-  const response = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  }, toGeminiRequestOptions(options));
+  const text = (response.text ?? "").trim();
+  const usage = await resolveUsageSummary({
+    contents,
+    responseText: text,
+    providerUsage: response.usageMetadata,
+    systemPrompt,
+    options
+  });
 
-  return response.response.text().trim();
+  return {
+    text,
+    usage
+  };
 }
 
 export async function embedText(text: string, options?: GeminiRequestOptions): Promise<number[]> {

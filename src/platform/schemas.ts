@@ -149,3 +149,17 @@ export const platformUpdateUserSchema = z.object({
 export const platformSubscribeSchema = z.object({
   plan: z.enum(["starter", "growth"])
 });
+
+export const platformAnalyticsRangeSchema = z.enum(["7d", "30d", "billing_cycle"]);
+
+export const platformAnalyticsQuerySchema = z.object({
+  range: platformAnalyticsRangeSchema.optional().default("7d"),
+  tenant_id: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().min(2).max(80).optional()
+  ),
+  timezone: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().min(1).max(120).optional()
+  )
+});

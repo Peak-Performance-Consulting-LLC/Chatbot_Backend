@@ -18,7 +18,11 @@ import { applyUserMessageToFlightState, isFlightStateComplete } from "@/flight/s
 import { clearFlightState, getFlightState, upsertFlightState } from "@/flight/stateStore";
 import type { FlightSearchState } from "@/flight/types";
 import { buildCollectingFlightUiMetadata, buildResultsFlightUiMetadata } from "@/flight/ui";
-import { generateGeminiText, streamGeminiReply } from "@/llm/gemini";
+import {
+  generateGeminiText,
+  streamGeminiReply,
+  type GeminiUsageSummary
+} from "@/llm/gemini";
 import { AEROCONCIERGE_SYSTEM_PROMPT, RUNTIME_POLICY_APPENDIX } from "@/llm/prompts";
 import { getBaseCorsHeaders, jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
@@ -26,6 +30,11 @@ import { logError, logInfo } from "@/lib/logger";
 import { enforceRateLimit } from "@/lib/rateLimit";
 import { getClientIp, getRequestId } from "@/lib/request";
 import { createSSEStream, streamTextInChunks } from "@/lib/sse";
+import {
+  getTenantSubscriptionUsageSnapshot,
+  insertPlatformUsageEvent,
+  type PlatformUsageEventResponseSource
+} from "@/platform/repository";
 import { retrieveKnowledge } from "@/rag/retrieve";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 import {
@@ -160,6 +169,21 @@ function buildNoKnowledgeMessage(callCta: CallCta) {
   };
 }
 
+function buildTrialMessageLimitReachedMessage(input: {
+  callCta: CallCta;
+  maxMessages: number;
+}) {
+  return {
+    text:
+      `This concierge has reached the free trial limit of ${input.maxMessages.toLocaleString()} visitor messages for this month. ` +
+      `Upgrade the plan to continue using this service. ` +
+      `For urgent help right now, connect with a specialist: [${input.callCta.number}](${input.callCta.tel}).`,
+    metadata: {
+      call_cta: input.callCta
+    } as MessageMetadata
+  };
+}
+
 async function ensureChatThread(input: {
   chatId?: string;
   tenantId: string;
@@ -187,7 +211,11 @@ async function produceFlightReply(input: {
   state: FlightSearchState | null;
   callCta: CallCta;
   writeToken: (token: string) => void;
-}): Promise<{ text: string; metadata?: MessageMetadata | null }> {
+}): Promise<{
+  text: string;
+  metadata?: MessageMetadata | null;
+  responseSource: PlatformUsageEventResponseSource;
+}> {
   const { state, updateNotes, responseHint } = applyUserMessageToFlightState(input.state, input.userMessage);
 
   if (!isFlightStateComplete(state)) {
@@ -203,6 +231,7 @@ async function produceFlightReply(input: {
 
     return {
       text: responseText,
+      responseSource: "static",
       metadata: {
         ...buildCollectingFlightUiMetadata(state, input.userMessage),
         call_cta: input.callCta,
@@ -227,6 +256,7 @@ async function produceFlightReply(input: {
 
     return {
       text: clarification,
+      responseSource: "static",
       metadata: {
         ...buildCollectingFlightUiMetadata(state, input.userMessage),
         call_cta: input.callCta,
@@ -251,6 +281,7 @@ async function produceFlightReply(input: {
 
     return {
       text: clarification,
+      responseSource: "static",
       metadata: {
         ...buildCollectingFlightUiMetadata(state, input.userMessage),
         call_cta: input.callCta,
@@ -274,6 +305,7 @@ async function produceFlightReply(input: {
 
     return {
       text: formatted.text,
+      responseSource: "flight_engine",
       metadata: {
         ...formatted.metadata,
         flight_payload: payload,
@@ -296,6 +328,7 @@ async function produceFlightReply(input: {
 
     return {
       text: message,
+      responseSource: "fallback",
       metadata: {
         call_cta: input.callCta,
         flight_payload: payload,
@@ -489,6 +522,78 @@ export async function POST(request: Request) {
       label: tenant.support_cta_label
     });
 
+    const tenantSubscriptionUsage = await getTenantSubscriptionUsageSnapshot(input.tenant_id);
+    const trialMessageLimit = tenantSubscriptionUsage?.subscription.max_messages_mo ?? 0;
+    const shouldBlockTrialUsage =
+      tenantSubscriptionUsage?.subscription.plan === "trial" &&
+      tenantSubscriptionUsage.subscription.status === "active" &&
+      tenantSubscriptionUsage.current_period_user_messages >= trialMessageLimit;
+
+    if (shouldBlockTrialUsage) {
+      const thread = await ensureChatThread({
+        chatId: input.chat_id,
+        tenantId: input.tenant_id,
+        deviceId: input.device_id,
+        message: input.message
+      });
+      const chatId = thread.id;
+      const blocked = buildTrialMessageLimitReachedMessage({
+        callCta,
+        maxMessages: trialMessageLimit
+      });
+
+      return createSSEStream(request, async (writer) => {
+        try {
+          streamTextInChunks(blocked.text, writer.token);
+
+          try {
+            await Promise.all([
+              insertChatMessage({
+                chat_id: chatId,
+                role: "assistant",
+                content: blocked.text,
+                metadata: {
+                  intent: "knowledge",
+                  tenant_id: input.tenant_id,
+                  ...blocked.metadata
+                }
+              }),
+              touchChatThread(chatId, {
+                title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
+              })
+            ]);
+          } catch (err) {
+            logError("trial_limit_message_save_failed", {
+              request_id: requestId,
+              chat_id: chatId,
+              tenant_id: input.tenant_id,
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+
+          writer.done({ chat_id: chatId });
+
+          logInfo("chat_stream_trial_limit_reached", {
+            request_id: requestId,
+            chat_id: chatId,
+            tenant_id: input.tenant_id,
+            device_id: input.device_id,
+            message_limit: trialMessageLimit
+          });
+        } catch (error) {
+          const asHttpError = toHttpError(error);
+          writer.error(asHttpError.message);
+
+          logError("chat_stream_trial_limit_failed", {
+            request_id: requestId,
+            chat_id: chatId,
+            error: asHttpError.message,
+            status: asHttpError.status
+          });
+        }
+      });
+    }
+
     const thread = await ensureChatThread({
       chatId: input.chat_id,
       tenantId: input.tenant_id,
@@ -521,22 +626,30 @@ export async function POST(request: Request) {
             }
           : {})
       }
-    }).catch((err) => logError("user_msg_insert_failed", {
-      request_id: requestId,
-      chat_id: chatId,
-      error: err instanceof Error ? err.message : String(err)
-    }));
+    });
 
     return createSSEStream(request, async (writer) => {
       let assistantText = "";
       let assistantMetadata: MessageMetadata | null = null;
       let assistantIntent: MessageIntent = requestIntent;
+      let responseSource: PlatformUsageEventResponseSource = "static";
+      let responseService: TravelService | null = null;
+      let ragMatch: boolean | null = null;
+      let usage: GeminiUsageSummary = {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        source: "none"
+      };
+      let hadResponseError = false;
+      const responseStartedAt = Date.now();
 
       try {
         const isFlight = requestIntent === "flight_search";
 
         if (isFlight) {
           assistantIntent = "flight_search";
+          responseService = "flights";
           const response = await produceFlightReply({
             chatId,
             tenantId: input.tenant_id,
@@ -548,6 +661,8 @@ export async function POST(request: Request) {
 
           assistantText = response.text;
           assistantMetadata = response.metadata ?? null;
+          responseSource = response.responseSource;
+          hadResponseError = response.responseSource === "fallback";
         } else if (requestIntent === "payment_support") {
           assistantIntent = "payment_support";
           const payment = buildPaymentSupportMessage(callCta);
@@ -577,172 +692,187 @@ export async function POST(request: Request) {
             assistantMetadata = company.metadata;
             streamTextInChunks(assistantText, writer.token);
           } else {
-          let retrievedContext = "";
-          let sourceUrls: string[] = [];
-          let history: Array<{ role: "user" | "assistant"; content: string }> = [];
+            let retrievedContext = "";
+            let sourceUrls: string[] = [];
+            let history: Array<{ role: "user" | "assistant"; content: string }> = [];
 
-          const [retrievalResult, recentMessagesResult] = await Promise.allSettled([
-            withTimeout(
-              (signal) =>
-                retrieveKnowledge({
-                  tenantId: input.tenant_id,
-                  query: input.message,
-                  matchCount: 4,
-                  maxChunks: 3,
-                  maxContextChars: 2200,
-                  minSimilarity: 0.45,
-                  signal
-                }),
-              KNOWLEDGE_RETRIEVAL_TIMEOUT_MS,
-              "Knowledge retrieval"
-            ),
-            input.chat_id
-              ? withTimeout(
-                  (signal) => listRecentMessages(chatId, 6, { signal }),
-                  HISTORY_LOAD_TIMEOUT_MS,
-                  "Chat history load"
-                )
-              : Promise.resolve([] as ChatMessage[])
-          ]);
-
-          if (retrievalResult.status === "fulfilled") {
-            retrievedContext = retrievalResult.value.contextText.trim();
-            sourceUrls = retrievalResult.value.sourceUrls;
-          } else {
-            retrievedContext = "";
-            sourceUrls = [];
-
-            logError("rag_retrieval_failed", {
-              request_id: requestId,
-              chat_id: chatId,
-              tenant_id: input.tenant_id,
-              error:
-                retrievalResult.reason instanceof Error
-                  ? retrievalResult.reason.message
-                  : String(retrievalResult.reason)
-            });
-          }
-
-          if (recentMessagesResult.status === "fulfilled") {
-            history = toHistory(recentMessagesResult.value).slice(0, -1);
-          } else {
-            logError("chat_history_load_failed", {
-              request_id: requestId,
-              chat_id: chatId,
-              tenant_id: input.tenant_id,
-              error:
-                recentMessagesResult.reason instanceof Error
-                  ? recentMessagesResult.reason.message
-                  : String(recentMessagesResult.reason)
-            });
-          }
-
-          assistantMetadata = {
-            call_cta: callCta,
-            source_urls: sourceUrls,
-            ...(retrievedContext ? {} : { no_rag_match: true })
-          };
-
-          if (!retrievedContext) {
-            const fallback = buildNoKnowledgeMessage(callCta);
-            assistantText = fallback.text;
-            assistantMetadata = {
-              ...(assistantMetadata ?? {}),
-              ...fallback.metadata
-            };
-            streamTextInChunks(assistantText, writer.token);
-          } else {
-            let allowStreamingTokens = true;
-            try {
-              assistantText = await withTimeout(
+            const [retrievalResult, recentMessagesResult] = await Promise.allSettled([
+              withTimeout(
                 (signal) =>
-                  streamGeminiReply({
-                    systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
-                    retrievedContext: [
-                      retrievedContext,
-                      `Support call number: ${callCta.number}`,
-                      `Support tel link: ${callCta.tel}`
-                    ].join("\n"),
-                    pageContext: input.page_context,
-                    history,
-                    userMessage: input.message,
-                    signal,
-                    timeoutMs: LLM_STREAM_TIMEOUT_MS,
-                    onToken: (token) => {
-                      if (allowStreamingTokens) {
-                        writer.token(token);
-                      }
-                    }
+                  retrieveKnowledge({
+                    tenantId: input.tenant_id,
+                    query: input.message,
+                    matchCount: 4,
+                    maxChunks: 3,
+                    maxContextChars: 2200,
+                    minSimilarity: 0.45,
+                    signal
                   }),
-                LLM_STREAM_TIMEOUT_MS,
-                "LLM stream"
-              );
+                KNOWLEDGE_RETRIEVAL_TIMEOUT_MS,
+                "Knowledge retrieval"
+              ),
+              input.chat_id
+                ? withTimeout(
+                    (signal) => listRecentMessages(chatId, 6, { signal }),
+                    HISTORY_LOAD_TIMEOUT_MS,
+                    "Chat history load"
+                  )
+                : Promise.resolve([] as ChatMessage[])
+            ]);
 
-              if (!assistantText) {
-                const fallback = buildNoKnowledgeMessage(callCta);
-                assistantText = fallback.text;
-                assistantMetadata = {
-                  ...(assistantMetadata ?? {}),
-                  ...fallback.metadata
-                };
-                streamTextInChunks(assistantText, writer.token);
-              }
-            } catch (error) {
-              allowStreamingTokens = false;
-              logError("llm_generation_failed", {
+            if (retrievalResult.status === "fulfilled") {
+              retrievedContext = retrievalResult.value.contextText.trim();
+              sourceUrls = retrievalResult.value.sourceUrls;
+            } else {
+              retrievedContext = "";
+              sourceUrls = [];
+              hadResponseError = true;
+
+              logError("rag_retrieval_failed", {
                 request_id: requestId,
                 chat_id: chatId,
                 tenant_id: input.tenant_id,
-                error: error instanceof Error ? error.message : String(error)
+                error:
+                  retrievalResult.reason instanceof Error
+                    ? retrievalResult.reason.message
+                    : String(retrievalResult.reason)
               });
+            }
 
-              const ragUserPrompt = buildRagUserPrompt({
-                retrievedContext,
-                callNumber: callCta.number,
-                callTel: callCta.tel,
-                userMessage: input.message,
-                pageContext: input.page_context
+            if (recentMessagesResult.status === "fulfilled") {
+              history = toHistory(recentMessagesResult.value).slice(0, -1);
+            } else {
+              hadResponseError = true;
+              logError("chat_history_load_failed", {
+                request_id: requestId,
+                chat_id: chatId,
+                tenant_id: input.tenant_id,
+                error:
+                  recentMessagesResult.reason instanceof Error
+                    ? recentMessagesResult.reason.message
+                    : String(recentMessagesResult.reason)
               });
+            }
 
+            ragMatch = retrievedContext ? true : false;
+            assistantMetadata = {
+              call_cta: callCta,
+              source_urls: sourceUrls,
+              ...(retrievedContext ? {} : { no_rag_match: true })
+            };
+
+            if (!retrievedContext) {
+              responseSource = "fallback";
+              const fallback = buildNoKnowledgeMessage(callCta);
+              assistantText = fallback.text;
+              assistantMetadata = {
+                ...(assistantMetadata ?? {}),
+                ...fallback.metadata
+              };
+              streamTextInChunks(assistantText, writer.token);
+            } else {
+              let allowStreamingTokens = true;
               try {
-                assistantText = await withTimeout(
+                const streamed = await withTimeout(
                   (signal) =>
-                    generateGeminiText(
-                      ragUserPrompt,
-                      `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
-                      {
-                        signal,
-                        timeoutMs: LLM_FALLBACK_TIMEOUT_MS
+                    streamGeminiReply({
+                      systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
+                      retrievedContext: [
+                        retrievedContext,
+                        `Support call number: ${callCta.number}`,
+                        `Support tel link: ${callCta.tel}`
+                      ].join("\n"),
+                      pageContext: input.page_context,
+                      history,
+                      userMessage: input.message,
+                      signal,
+                      timeoutMs: LLM_STREAM_TIMEOUT_MS,
+                      onToken: (token) => {
+                        if (allowStreamingTokens) {
+                          writer.token(token);
+                        }
                       }
-                    ),
-                  LLM_FALLBACK_TIMEOUT_MS,
-                  "LLM fallback"
+                    }),
+                  LLM_STREAM_TIMEOUT_MS,
+                  "LLM stream"
                 );
 
-                if (!assistantText) {
-                  throw new Error("LLM non-stream fallback returned empty text");
-                }
+                assistantText = streamed.text;
+                usage = streamed.usage;
+                responseSource = "llm";
 
-                streamTextInChunks(assistantText, writer.token);
-              } catch (fallbackError) {
-                logError("llm_generation_fallback_failed", {
+                if (!assistantText) {
+                  hadResponseError = true;
+                  responseSource = "fallback";
+                  const fallback = buildNoKnowledgeMessage(callCta);
+                  assistantText = fallback.text;
+                  assistantMetadata = {
+                    ...(assistantMetadata ?? {}),
+                    ...fallback.metadata
+                  };
+                  streamTextInChunks(assistantText, writer.token);
+                }
+              } catch (error) {
+                allowStreamingTokens = false;
+                hadResponseError = true;
+                responseSource = "fallback";
+                logError("llm_generation_failed", {
                   request_id: requestId,
                   chat_id: chatId,
                   tenant_id: input.tenant_id,
-                  error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                  error: error instanceof Error ? error.message : String(error)
                 });
 
-                assistantText =
-                  `I'm unable to access support responses right now. ` +
-                  `Please try again shortly, or connect at [${callCta.number}](${callCta.tel}).`;
-                assistantMetadata = {
-                  call_cta: callCta
-                };
-                streamTextInChunks(assistantText, writer.token);
+                const ragUserPrompt = buildRagUserPrompt({
+                  retrievedContext,
+                  callNumber: callCta.number,
+                  callTel: callCta.tel,
+                  userMessage: input.message,
+                  pageContext: input.page_context
+                });
+
+                try {
+                  const fallbackResult = await withTimeout(
+                    (signal) =>
+                      generateGeminiText(
+                        ragUserPrompt,
+                        `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
+                        {
+                          signal,
+                          timeoutMs: LLM_FALLBACK_TIMEOUT_MS
+                        }
+                      ),
+                    LLM_FALLBACK_TIMEOUT_MS,
+                    "LLM fallback"
+                  );
+
+                  assistantText = fallbackResult.text;
+                  usage = fallbackResult.usage;
+
+                  if (!assistantText) {
+                    throw new Error("LLM non-stream fallback returned empty text");
+                  }
+
+                  streamTextInChunks(assistantText, writer.token);
+                } catch (fallbackError) {
+                  logError("llm_generation_fallback_failed", {
+                    request_id: requestId,
+                    chat_id: chatId,
+                    tenant_id: input.tenant_id,
+                    error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                  });
+
+                  assistantText =
+                    `I'm unable to access support responses right now. ` +
+                    `Please try again shortly, or connect at [${callCta.number}](${callCta.tel}).`;
+                  assistantMetadata = {
+                    call_cta: callCta
+                  };
+                  streamTextInChunks(assistantText, writer.token);
+                }
               }
             }
           }
-        }
         }
 
         if (!assistantText) {
@@ -751,10 +881,20 @@ export async function POST(request: Request) {
 
         // Persist both sides of the exchange before signaling completion so the
         // follow-up message sync cannot overwrite the streamed reply with stale data.
-        await userMsgPromise;
-
+        let userMessage = null;
         try {
-          await Promise.all([
+          userMessage = await userMsgPromise;
+        } catch (err) {
+          logError("user_msg_insert_failed", {
+            request_id: requestId,
+            chat_id: chatId,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+
+        let assistantMessage = null;
+        try {
+          const [savedAssistantMessage] = await Promise.all([
             insertChatMessage({
               chat_id: chatId,
               role: "assistant",
@@ -769,10 +909,44 @@ export async function POST(request: Request) {
               title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
             })
           ]);
+          assistantMessage = savedAssistantMessage;
         } catch (err) {
           logError("post_response_save_failed", {
             request_id: requestId,
             chat_id: chatId,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+
+        try {
+          await insertPlatformUsageEvent({
+            tenant_id: input.tenant_id,
+            chat_id: chatId,
+            device_id: input.device_id,
+            user_message_id: userMessage?.id ?? null,
+            assistant_message_id: assistantMessage?.id ?? null,
+            intent: assistantIntent,
+            service:
+              responseService ??
+              (assistantMetadata?.service_request &&
+              typeof assistantMetadata.service_request === "object" &&
+              "service" in assistantMetadata.service_request
+                ? (assistantMetadata.service_request.service as TravelService)
+                : null),
+            response_source: responseSource,
+            rag_match: ragMatch,
+            prompt_tokens: usage.promptTokens,
+            completion_tokens: usage.completionTokens,
+            total_tokens: usage.totalTokens,
+            token_source: usage.source,
+            latency_ms: Math.max(0, Date.now() - responseStartedAt),
+            had_error: hadResponseError
+          });
+        } catch (err) {
+          logError("usage_event_insert_failed", {
+            request_id: requestId,
+            chat_id: chatId,
+            tenant_id: input.tenant_id,
             error: err instanceof Error ? err.message : String(err)
           });
         }
