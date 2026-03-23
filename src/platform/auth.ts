@@ -7,6 +7,10 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function hashOpaqueToken(token: string): string {
+  return sha256(token);
+}
+
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
   const derived = scryptSync(password, salt, PASSWORD_KEYLEN).toString("hex");
@@ -33,7 +37,15 @@ export function createSessionToken(): { token: string; tokenHash: string } {
   const token = randomBytes(32).toString("hex");
   return {
     token,
-    tokenHash: sha256(token)
+    tokenHash: hashOpaqueToken(token)
+  };
+}
+
+export function createPasswordResetToken(): { token: string; tokenHash: string } {
+  const token = randomBytes(32).toString("hex");
+  return {
+    token,
+    tokenHash: hashOpaqueToken(token)
   };
 }
 
@@ -49,6 +61,5 @@ export function parseBearerToken(request: Request): string {
 }
 
 export function hashSessionToken(token: string): string {
-  return sha256(token);
+  return hashOpaqueToken(token);
 }
-

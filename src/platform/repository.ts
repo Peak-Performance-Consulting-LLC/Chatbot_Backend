@@ -12,12 +12,14 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("Could not find the table 'public.tenant_domain_verifications'") ||
     message.includes("Could not find the table 'public.tenant_sources'") ||
     message.includes("Could not find the table 'public.platform_subscriptions'") ||
+    message.includes("Could not find the table 'public.platform_password_resets'") ||
     message.includes('relation "public.platform_users" does not exist') ||
     message.includes('relation "public.platform_sessions" does not exist') ||
     message.includes('relation "public.platform_user_tenants" does not exist') ||
     message.includes('relation "public.tenant_domain_verifications" does not exist') ||
     message.includes('relation "public.tenant_sources" does not exist') ||
     message.includes('relation "public.platform_subscriptions" does not exist') ||
+    message.includes('relation "public.platform_password_resets" does not exist') ||
     message.includes("column tenants.business_type does not exist") ||
     message.includes("column tenants.supported_services does not exist") ||
     message.includes("column tenants.support_phone does not exist") ||
@@ -100,6 +102,15 @@ type PlatformSessionRow = {
   token_hash: string;
   created_at: string;
   expires_at: string;
+};
+
+type PlatformPasswordResetRow = {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  expires_at: string;
+  consumed_at: string | null;
+  created_at: string;
 };
 
 export type DomainVerificationStatus = "pending" | "txt_not_found" | "txt_mismatch" | "verified";
@@ -847,6 +858,110 @@ export async function createPlatformSession(userId: string): Promise<PlatformSes
     token,
     expires_at: expiresAt
   };
+}
+
+export async function createPlatformPasswordResetToken(input: {
+  userId: string;
+  tokenHash: string;
+  expiresAt: string;
+}): Promise<void> {
+  const { error: cleanupError } = await supabaseAdmin
+    .from("platform_password_resets")
+    .delete()
+    .eq("user_id", input.userId);
+
+  if (cleanupError) {
+    throwPlatformSchemaMissingError(`Failed to clear password reset tokens: ${cleanupError.message}`);
+  }
+
+  const { error } = await supabaseAdmin
+    .from("platform_password_resets")
+    .insert({
+      user_id: input.userId,
+      token_hash: input.tokenHash,
+      expires_at: input.expiresAt,
+      consumed_at: null
+    });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to create password reset token: ${error.message}`);
+  }
+}
+
+async function getPlatformPasswordResetByTokenHash(tokenHash: string): Promise<PlatformPasswordResetRow | null> {
+  const { data, error } = await supabaseAdmin
+    .from("platform_password_resets")
+    .select("*")
+    .eq("token_hash", tokenHash)
+    .is("consumed_at", null)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load password reset token: ${error.message}`);
+  }
+
+  return (data as PlatformPasswordResetRow | null) ?? null;
+}
+
+export async function consumePlatformPasswordReset(input: {
+  tokenHash: string;
+  password: string;
+}): Promise<PlatformUserSummary> {
+  const reset = await getPlatformPasswordResetByTokenHash(input.tokenHash);
+  if (!reset) {
+    throw new HttpError(400, "This password reset link is invalid or has expired.");
+  }
+
+  if (new Date(reset.expires_at).getTime() < Date.now()) {
+    await supabaseAdmin.from("platform_password_resets").delete().eq("id", reset.id);
+    throw new HttpError(400, "This password reset link is invalid or has expired.");
+  }
+
+  const { error: consumeError } = await supabaseAdmin
+    .from("platform_password_resets")
+    .update({
+      consumed_at: new Date().toISOString()
+    })
+    .eq("id", reset.id)
+    .is("consumed_at", null);
+
+  if (consumeError) {
+    throwPlatformSchemaMissingError(`Failed to consume password reset token: ${consumeError.message}`);
+  }
+
+  const { data: user, error: userError } = await supabaseAdmin
+    .from("platform_users")
+    .update({
+      password_hash: hashPassword(input.password)
+    })
+    .eq("id", reset.user_id)
+    .select("*")
+    .single();
+
+  if (userError || !user) {
+    throwPlatformSchemaMissingError(`Failed to update password: ${userError?.message ?? "Unknown error"}`);
+  }
+
+  const { error: sessionError } = await supabaseAdmin
+    .from("platform_sessions")
+    .delete()
+    .eq("user_id", reset.user_id);
+
+  if (sessionError) {
+    throwPlatformSchemaMissingError(`Failed to revoke existing sessions: ${sessionError.message}`);
+  }
+
+  const { error: cleanupError } = await supabaseAdmin
+    .from("platform_password_resets")
+    .delete()
+    .eq("user_id", reset.user_id)
+    .neq("id", reset.id);
+
+  if (cleanupError) {
+    throwPlatformSchemaMissingError(`Failed to clear password reset tokens: ${cleanupError.message}`);
+  }
+
+  return toPlatformUserSummary(user as PlatformUserRow);
 }
 
 export async function resolvePlatformSession(

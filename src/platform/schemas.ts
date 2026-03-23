@@ -53,6 +53,15 @@ export const platformLoginSchema = z.object({
   password: z.string().min(8).max(120)
 });
 
+export const platformForgotPasswordSchema = z.object({
+  email: z.string().trim().email().max(160)
+});
+
+export const platformResetPasswordSchema = z.object({
+  token: z.string().trim().min(32).max(512),
+  password: z.string().min(8).max(120)
+});
+
 export const platformVerifyDomainSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80)
 });

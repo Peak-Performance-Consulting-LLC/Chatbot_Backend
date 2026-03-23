@@ -3,9 +3,14 @@ import type Stripe from "stripe";
 import { getEnv } from "@/config/env";
 import { HttpError } from "@/lib/httpError";
 import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
+import { createPasswordResetToken, hashOpaqueToken } from "@/platform/auth";
+import { sendPlatformPasswordResetEmail } from "@/platform/email";
+import { enforcePlatformPasswordResetRateLimit } from "@/platform/passwordResetRateLimit";
 import {
   assertTenantOwnership,
+  consumePlatformPasswordReset,
   createPlatformSession,
+  createPlatformPasswordResetToken,
   createTrialSubscription,
   createPlatformUser,
   createTenantForUser,
@@ -13,6 +18,7 @@ import {
   deleteTenantById,
   findTenantIdByDomain,
   getDomainVerification,
+  getPlatformUserByEmail,
   getSubscriptionByStripeSubscriptionId,
   getSubscriptionByUserId,
   getPlatformUsageTrackingStartedAt,
@@ -62,6 +68,13 @@ function normalizeWebsiteUrl(input: string): URL {
       throw new HttpError(400, "Invalid website URL");
     }
   }
+}
+
+function buildPasswordResetUrl(token: string): string {
+  const appUrl = new URL(getEnv().PLATFORM_APP_URL);
+  const resetUrl = new URL("/platform/reset-password", appUrl);
+  resetUrl.searchParams.set("token", token);
+  return resetUrl.toString();
 }
 
 function buildTenantSources(input: {
@@ -586,6 +599,70 @@ export async function loginPlatformUser(input: { email: string; password: string
     token: session.token,
     expires_at: session.expires_at,
     tenants: tenants.map(toPlatformTenant)
+  };
+}
+
+export async function requestPlatformPasswordReset(input: {
+  email: string;
+  ipAddress?: string | null;
+}) {
+  const normalizedEmail = input.email.trim().toLowerCase();
+  const ipAddress = input.ipAddress?.trim() || "unknown";
+
+  enforcePlatformPasswordResetRateLimit(`platform-password-reset:request:${ipAddress}:${normalizedEmail}`);
+
+  const user = await getPlatformUserByEmail(normalizedEmail);
+  const message =
+    "If that email exists, a password reset link has been sent.";
+
+  if (!user) {
+    return {
+      ok: true,
+      message
+    };
+  }
+
+  const env = getEnv();
+  const { token, tokenHash } = createPasswordResetToken();
+  const expiresAt = new Date(
+    Date.now() + env.PLATFORM_PASSWORD_RESET_TTL_MINUTES * 60 * 1000
+  ).toISOString();
+
+  await createPlatformPasswordResetToken({
+    userId: user.id,
+    tokenHash,
+    expiresAt
+  });
+
+  await sendPlatformPasswordResetEmail({
+    to: user.email,
+    fullName: user.full_name,
+    resetUrl: buildPasswordResetUrl(token),
+    expiresInMinutes: env.PLATFORM_PASSWORD_RESET_TTL_MINUTES
+  });
+
+  return {
+    ok: true,
+    message
+  };
+}
+
+export async function resetPlatformPassword(input: {
+  token: string;
+  password: string;
+  ipAddress?: string | null;
+}) {
+  const ipAddress = input.ipAddress?.trim() || "unknown";
+  enforcePlatformPasswordResetRateLimit(`platform-password-reset:submit:${ipAddress}`);
+
+  await consumePlatformPasswordReset({
+    tokenHash: hashOpaqueToken(input.token.trim()),
+    password: input.password
+  });
+
+  return {
+    ok: true,
+    message: "Password updated. You can now sign in with your new password."
   };
 }
 

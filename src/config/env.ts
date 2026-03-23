@@ -19,6 +19,12 @@ const envSchema = z.object({
   PLATFORM_AUTO_INGEST_ON_SIGNUP: z.string().optional(),
   PLATFORM_AUTO_INGEST_ON_SOURCE_UPDATE: z.string().optional(),
   PLATFORM_APP_URL: z.string().default("http://localhost:5173"),
+  SMTP_HOST: z.string().default(""),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z.coerce.boolean().default(false),
+  SMTP_USER: z.string().default(""),
+  SMTP_PASS: z.string().default(""),
+  SMTP_FROM: z.string().default(""),
   GOOGLE_OAUTH_CLIENT_ID: z.string().default(""),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().default(""),
   FACEBOOK_OAUTH_APP_ID: z.string().default(""),
@@ -29,8 +35,12 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().default(""),
   STRIPE_PRICE_STARTER: z.string().default(""),
   STRIPE_PRICE_GROWTH: z.string().default(""),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().optional(),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(30),
-  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000)
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),
+  PLATFORM_PASSWORD_RESET_RATE_LIMIT_MAX: z.coerce.number().int().positive().optional(),
+  PLATFORM_PASSWORD_RESET_WINDOW_MS: z.coerce.number().int().positive().default(900000),
+  PLATFORM_PASSWORD_RESET_TTL_MINUTES: z.coerce.number().int().positive().default(60)
 });
 
 export type AppEnv = z.infer<typeof envSchema> & {

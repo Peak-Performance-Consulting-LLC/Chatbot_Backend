@@ -112,7 +112,8 @@ async function checkSupabaseSchema(args: Record<string, string>): Promise<CheckR
     "platform_sessions",
     "platform_user_tenants",
     "tenant_domain_verifications",
-    "tenant_sources"
+    "tenant_sources",
+    "platform_password_resets"
   ];
 
   for (const table of requiredTables) {

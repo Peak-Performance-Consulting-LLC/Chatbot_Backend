@@ -332,6 +332,21 @@ create table if not exists public.tenant_sources (
 create index if not exists tenant_sources_tenant_idx
   on public.tenant_sources(tenant_id, created_at asc);
 
+create table if not exists public.platform_password_resets (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.platform_users(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists platform_password_resets_user_idx
+  on public.platform_password_resets(user_id, created_at desc);
+
+create index if not exists platform_password_resets_expires_idx
+  on public.platform_password_resets(expires_at);
+
 -- ============================================================================
 -- SUBSCRIPTIONS (pricing & 14-day trial)
 -- ============================================================================
