@@ -1,8 +1,30 @@
 import { z } from "zod";
 
+function parseBooleanEnv(value: unknown): unknown {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "off", ""].includes(normalized)) {
+    return false;
+  }
+
+  return value;
+}
+
+const booleanEnvSchema = z.preprocess(parseBooleanEnv, z.boolean());
+
 const envSchema = z.object({
   NEXT_PUBLIC_ALLOWED_ORIGINS: z.string().default(""),
-  CORS_STRICT: z.coerce.boolean().default(false),
+  CORS_STRICT: booleanEnvSchema.default(false),
   GEMINI_API_KEY: z.string().default(""),
   GEMINI_CHAT_MODEL: z.string().default("gemini-2.5-flash"),
   GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
@@ -21,7 +43,7 @@ const envSchema = z.object({
   PLATFORM_APP_URL: z.string().default("http://localhost:5173"),
   SMTP_HOST: z.string().default(""),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
-  SMTP_SECURE: z.coerce.boolean().default(false),
+  SMTP_SECURE: booleanEnvSchema.default(false),
   SMTP_USER: z.string().default(""),
   SMTP_PASS: z.string().default(""),
   SMTP_FROM: z.string().default(""),
