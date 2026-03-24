@@ -62,6 +62,10 @@ const HISTORY_LOAD_TIMEOUT_MS = 3000;
 const KNOWLEDGE_RETRIEVAL_TIMEOUT_MS = 8000;
 const LLM_STREAM_TIMEOUT_MS = 18000;
 const LLM_FALLBACK_TIMEOUT_MS = 10000;
+const KNOWLEDGE_MATCH_COUNT = 8;
+const KNOWLEDGE_MAX_CHUNKS = 4;
+const KNOWLEDGE_MAX_CONTEXT_CHARS = 2600;
+const KNOWLEDGE_MIN_SIMILARITY = 0.2;
 const CONTACT_CAPTURE_PROMPT =
   "Before we continue, please share your name, email, and phone so we can assist you better.";
 const CONTACT_CAPTURE_FIELDS: Array<"name" | "email" | "phone"> = ["name", "email", "phone"];
@@ -798,10 +802,10 @@ export async function POST(request: Request) {
                   retrieveKnowledge({
                     tenantId: input.tenant_id,
                     query: input.message,
-                    matchCount: 4,
-                    maxChunks: 3,
-                    maxContextChars: 2200,
-                    minSimilarity: 0.45,
+                    matchCount: KNOWLEDGE_MATCH_COUNT,
+                    maxChunks: KNOWLEDGE_MAX_CHUNKS,
+                    maxContextChars: KNOWLEDGE_MAX_CONTEXT_CHARS,
+                    minSimilarity: KNOWLEDGE_MIN_SIMILARITY,
                     signal
                   }),
                 KNOWLEDGE_RETRIEVAL_TIMEOUT_MS,

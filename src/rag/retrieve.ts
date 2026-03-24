@@ -20,6 +20,20 @@ const retrievalCache = new Map<
   }
 >();
 
+export function clearRetrievalCache(tenantId?: string) {
+  if (!tenantId) {
+    retrievalCache.clear();
+    return;
+  }
+
+  const prefix = `${tenantId}::`;
+  for (const key of retrievalCache.keys()) {
+    if (key.startsWith(prefix)) {
+      retrievalCache.delete(key);
+    }
+  }
+}
+
 function normalizeQuery(input: string) {
   return input.trim().toLowerCase().replace(/\s+/g, " ");
 }

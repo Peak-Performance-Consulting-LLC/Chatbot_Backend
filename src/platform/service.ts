@@ -3,6 +3,7 @@ import type Stripe from "stripe";
 import { getEnv } from "@/config/env";
 import { HttpError } from "@/lib/httpError";
 import { ingestKnowledgeForTenant, type TenantSourceInput } from "@/rag/ingest";
+import { clearRetrievalCache } from "@/rag/retrieve";
 import { createPasswordResetToken, hashOpaqueToken } from "@/platform/auth";
 import { sendPlatformPasswordResetEmail } from "@/platform/email";
 import { enforcePlatformPasswordResetRateLimit } from "@/platform/passwordResetRateLimit";
@@ -301,6 +302,7 @@ async function runProvisioningIngest(input: {
       message,
       last_ingested_at: null
     });
+    clearRetrievalCache(input.tenantId);
 
     return {
       tenant_id: input.tenantId,
@@ -317,6 +319,7 @@ async function runProvisioningIngest(input: {
     message: summary.message,
     last_ingested_at: new Date().toISOString()
   });
+  clearRetrievalCache(input.tenantId);
 
   return result;
 }
@@ -1698,6 +1701,7 @@ export async function runTenantIngestion(input: {
       message,
       last_ingested_at: null
     });
+    clearRetrievalCache(input.tenant_id);
 
     return {
       tenant_id: input.tenant_id,
@@ -1718,6 +1722,7 @@ export async function runTenantIngestion(input: {
     message: summary.message,
     last_ingested_at: new Date().toISOString()
   });
+  clearRetrievalCache(input.tenant_id);
 
   return {
     tenant_id: input.tenant_id,
