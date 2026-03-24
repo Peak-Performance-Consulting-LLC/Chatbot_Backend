@@ -25,12 +25,14 @@ import {
   listTenantSources,
   listPlatformAnalyticsMessages,
   listPlatformUsageEvents,
+  listTenantVisitorContacts,
   listUserTenants,
   replaceTenantSources,
   resolvePlatformSession,
   syncSubscriptionFromStripe,
   type PlatformAnalyticsMessageRow,
   type PlatformAnalyticsUsageRow,
+  type PlatformVisitorContactRow,
   type SubscriptionSummary,
   type SupportedService,
   type TenantBusinessProfile,
@@ -989,6 +991,25 @@ export type PlatformAnalyticsResponse = {
     | null;
 };
 
+export type PlatformVisitorContact = {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  chat_id: string | null;
+  full_name: string;
+  email: string;
+  phone: string;
+  captured_at: string;
+};
+
+export type PlatformVisitorContactsResponse = {
+  tenant_id: string;
+  total: number;
+  limit: number;
+  offset: number;
+  contacts: PlatformVisitorContact[];
+};
+
 const ANALYTICS_CACHE_TTL_MS = 60_000;
 const ANALYTICS_QUERY_PADDING_MS = 36 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1398,6 +1419,19 @@ function getAnalyticsDateRange(
   };
 }
 
+function toPlatformVisitorContact(row: PlatformVisitorContactRow): PlatformVisitorContact {
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    device_id: row.device_id,
+    chat_id: row.chat_id,
+    full_name: row.full_name,
+    email: row.email,
+    phone: row.phone_raw || row.phone_normalized,
+    captured_at: row.captured_at
+  };
+}
+
 export async function getPlatformAnalytics(input: {
   token: string;
   range: PlatformAnalyticsRange;
@@ -1517,6 +1551,32 @@ export async function getPlatformAnalytics(input: {
 
   setCachedAnalytics(cacheKey, response);
   return response;
+}
+
+export async function getPlatformVisitorContacts(input: {
+  token: string;
+  tenant_id: string;
+  query?: string;
+  limit: number;
+  offset: number;
+}): Promise<PlatformVisitorContactsResponse> {
+  const user = await resolvePlatformSession(input.token);
+  await assertTenantOwnership(user.id, input.tenant_id);
+
+  const { contacts, total } = await listTenantVisitorContacts({
+    tenant_id: input.tenant_id,
+    query: input.query,
+    limit: input.limit,
+    offset: input.offset
+  });
+
+  return {
+    tenant_id: input.tenant_id,
+    total,
+    limit: input.limit,
+    offset: input.offset,
+    contacts: contacts.map(toPlatformVisitorContact)
+  };
 }
 
 export async function enforcePlanLimits(userId: string, action: "create_tenant") {

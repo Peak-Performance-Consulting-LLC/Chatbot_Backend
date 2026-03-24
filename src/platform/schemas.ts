@@ -172,3 +172,31 @@ export const platformAnalyticsQuerySchema = z.object({
     z.string().trim().min(1).max(120).optional()
   )
 });
+
+export const platformVisitorContactsQuerySchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80),
+  query: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().max(120).optional()
+  ),
+  limit: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return 50;
+      }
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 50;
+    },
+    z.number().int().min(1).max(200)
+  ),
+  offset: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return 0;
+      }
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    },
+    z.number().int().min(0).max(10_000)
+  )
+});

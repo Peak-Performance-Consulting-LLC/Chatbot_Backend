@@ -1,7 +1,10 @@
 import { buildChatTitleFromMessage } from "@/chat/title";
 import {
   assertChatOwnership,
+  countAssistantMessagesForTenantDevice,
+  countChatsForTenantDevice,
   createChatThread,
+  getVisitorContactByTenantDevice,
   insertChatMessage,
   listRecentMessages,
   touchChatThread
@@ -59,9 +62,47 @@ const HISTORY_LOAD_TIMEOUT_MS = 3000;
 const KNOWLEDGE_RETRIEVAL_TIMEOUT_MS = 8000;
 const LLM_STREAM_TIMEOUT_MS = 18000;
 const LLM_FALLBACK_TIMEOUT_MS = 10000;
+const CONTACT_CAPTURE_PROMPT =
+  "Before we continue, please share your name, email, and phone so we can assist you better.";
+const CONTACT_CAPTURE_FIELDS: Array<"name" | "email" | "phone"> = ["name", "email", "phone"];
 
 function isFlightStateActive(state: FlightSearchState | null) {
   return Boolean(state && state.status !== "done" && state.status !== "completed");
+}
+
+function stableHash(input: string) {
+  let hash = 0;
+  for (let idx = 0; idx < input.length; idx += 1) {
+    hash = (hash * 31 + input.charCodeAt(idx)) >>> 0;
+  }
+  return hash;
+}
+
+function getContactCaptureThreshold(tenantId: string, deviceId: string) {
+  const hash = stableHash(`${tenantId}:${deviceId}`);
+  return hash % 2 === 0 ? 2 : 3;
+}
+
+function buildContactCaptureMetadata(): MessageMetadata["contact_capture"] {
+  return {
+    required: true,
+    prompt: CONTACT_CAPTURE_PROMPT,
+    fields: CONTACT_CAPTURE_FIELDS
+  };
+}
+
+async function getContactCaptureState(input: { tenantId: string; deviceId: string }) {
+  const [contact, assistantCount, chatCount] = await Promise.all([
+    getVisitorContactByTenantDevice(input.tenantId, input.deviceId),
+    countAssistantMessagesForTenantDevice(input.tenantId, input.deviceId),
+    countChatsForTenantDevice(input.tenantId, input.deviceId)
+  ]);
+
+  return {
+    hasContact: Boolean(contact),
+    threshold: getContactCaptureThreshold(input.tenantId, input.deviceId),
+    assistantResponses: Math.max(0, assistantCount - chatCount)
+  };
 }
 
 async function withTimeout<T>(
@@ -601,6 +642,58 @@ export async function POST(request: Request) {
       message: input.message
     });
     const chatId = thread.id;
+    const contactCaptureState = await getContactCaptureState({
+      tenantId: input.tenant_id,
+      deviceId: input.device_id
+    });
+    const shouldGateContactCapture =
+      !contactCaptureState.hasContact &&
+      contactCaptureState.assistantResponses >= contactCaptureState.threshold;
+
+    if (shouldGateContactCapture) {
+      return createSSEStream(request, async (writer) => {
+        try {
+          streamTextInChunks(CONTACT_CAPTURE_PROMPT, writer.token);
+
+          try {
+            await Promise.all([
+              insertChatMessage({
+                chat_id: chatId,
+                role: "assistant",
+                content: CONTACT_CAPTURE_PROMPT,
+                metadata: {
+                  intent: "support",
+                  tenant_id: input.tenant_id,
+                  contact_capture: buildContactCaptureMetadata()
+                }
+              }),
+              touchChatThread(chatId, {
+                title: thread.title === "New chat" ? buildChatTitleFromMessage(input.message) : undefined
+              })
+            ]);
+          } catch (err) {
+            logError("contact_capture_gate_save_failed", {
+              request_id: requestId,
+              chat_id: chatId,
+              tenant_id: input.tenant_id,
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+
+          writer.done({ chat_id: chatId });
+        } catch (error) {
+          const asHttpError = toHttpError(error);
+          writer.error(asHttpError.message);
+          logError("contact_capture_gate_failed", {
+            request_id: requestId,
+            chat_id: chatId,
+            tenant_id: input.tenant_id,
+            error: asHttpError.message,
+            status: asHttpError.status
+          });
+        }
+      });
+    }
 
     // Run flight state lookup concurrently with intent detection prep
     const currentFlightState = await getFlightState(chatId);
@@ -627,6 +720,9 @@ export async function POST(request: Request) {
           : {})
       }
     });
+    const shouldAttachContactCapturePrompt =
+      !contactCaptureState.hasContact &&
+      contactCaptureState.assistantResponses + 1 >= contactCaptureState.threshold;
 
     return createSSEStream(request, async (writer) => {
       let assistantText = "";
@@ -877,6 +973,16 @@ export async function POST(request: Request) {
 
         if (!assistantText) {
           throw new HttpError(500, "Assistant response is empty");
+        }
+
+        if (shouldAttachContactCapturePrompt) {
+          const promptSuffix = `\n\n${CONTACT_CAPTURE_PROMPT}`;
+          assistantText = `${assistantText}${promptSuffix}`;
+          assistantMetadata = {
+            ...(assistantMetadata ?? {}),
+            contact_capture: buildContactCaptureMetadata()
+          };
+          streamTextInChunks(promptSuffix, writer.token);
         }
 
         // Persist both sides of the exchange before signaling completion so the

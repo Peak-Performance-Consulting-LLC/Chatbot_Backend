@@ -9,6 +9,11 @@ export type MessageIntent =
   | "service_request";
 
 export type MessageMetadata = {
+  contact_capture?: {
+    required: boolean;
+    prompt: string;
+    fields: Array<"name" | "email" | "phone">;
+  };
   quick_replies?: string[];
   service_request?: {
     service: "hotels" | "cars" | "cruises";

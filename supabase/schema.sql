@@ -395,6 +395,37 @@ for each row
 execute procedure public.set_updated_at();
 
 -- ============================================================================
+-- VISITOR CONTACT CAPTURE
+-- ============================================================================
+
+create table if not exists public.visitor_contacts (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id text not null references public.tenants(tenant_id) on delete cascade,
+  device_id text not null,
+  chat_id uuid references public.chats(id) on delete set null,
+  full_name text not null,
+  email text not null,
+  phone_raw text not null,
+  phone_normalized text not null,
+  captured_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (tenant_id, device_id)
+);
+
+create index if not exists visitor_contacts_tenant_captured_idx
+  on public.visitor_contacts (tenant_id, captured_at desc);
+
+create index if not exists visitor_contacts_tenant_email_idx
+  on public.visitor_contacts (tenant_id, lower(email));
+
+drop trigger if exists visitor_contacts_set_updated_at on public.visitor_contacts;
+create trigger visitor_contacts_set_updated_at
+before update on public.visitor_contacts
+for each row
+execute procedure public.set_updated_at();
+
+-- ============================================================================
 -- PLATFORM ANALYTICS USAGE EVENTS
 -- ============================================================================
 

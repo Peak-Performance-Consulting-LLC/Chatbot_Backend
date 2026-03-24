@@ -67,7 +67,9 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("column platform_subscriptions.stripe_price_id does not exist") ||
     message.includes("column platform_subscriptions.cancel_at_period_end does not exist") ||
     message.includes("Could not find the table 'public.platform_usage_events'") ||
-    message.includes('relation "public.platform_usage_events" does not exist')
+    message.includes('relation "public.platform_usage_events" does not exist') ||
+    message.includes("Could not find the table 'public.visitor_contacts'") ||
+    message.includes('relation "public.visitor_contacts" does not exist')
   );
 }
 
@@ -2146,6 +2148,20 @@ export type TenantSubscriptionUsageSnapshot = {
   current_period_user_messages: number;
 };
 
+export type PlatformVisitorContactRow = {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  chat_id: string | null;
+  full_name: string;
+  email: string;
+  phone_raw: string;
+  phone_normalized: string;
+  captured_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
 function normalizeJoinedChat(
   joined: PlatformAnalyticsJoinedChat | PlatformAnalyticsJoinedChat[] | null | undefined
 ): PlatformAnalyticsJoinedChat | null {
@@ -2194,6 +2210,39 @@ export async function insertPlatformUsageEvent(input: {
   if (error) {
     throwPlatformSchemaMissingError(`Failed to insert usage event: ${error.message}`);
   }
+}
+
+export async function listTenantVisitorContacts(input: {
+  tenant_id: string;
+  query?: string;
+  limit: number;
+  offset: number;
+}): Promise<{ contacts: PlatformVisitorContactRow[]; total: number }> {
+  let query = supabaseAdmin
+    .from("visitor_contacts")
+    .select(
+      "id, tenant_id, device_id, chat_id, full_name, email, phone_raw, phone_normalized, captured_at, created_at, updated_at",
+      { count: "exact" }
+    )
+    .eq("tenant_id", input.tenant_id)
+    .order("captured_at", { ascending: false });
+
+  const searchTerm = input.query?.trim();
+  if (searchTerm) {
+    const pattern = `%${searchTerm.replace(/,/g, " ")}%`;
+    query = query.or(`full_name.ilike.${pattern},email.ilike.${pattern},phone_raw.ilike.${pattern}`);
+  }
+
+  const { data, error, count } = await query.range(input.offset, input.offset + input.limit - 1);
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load visitor contacts: ${error.message}`);
+  }
+
+  return {
+    contacts: (data ?? []) as PlatformVisitorContactRow[],
+    total: count ?? 0
+  };
 }
 
 export async function listUserTenantIds(userId: string): Promise<string[]> {

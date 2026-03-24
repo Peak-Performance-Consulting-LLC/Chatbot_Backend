@@ -1,5 +1,23 @@
 import { z } from "zod";
 
+const visitorNameSchema = z
+  .string()
+  .trim()
+  .min(2)
+  .max(80)
+  .regex(/^(?=.{2,80}$)[\p{L}][\p{L}\p{M}\s'.-]*$/u, "Enter a valid name");
+
+const visitorPhoneSchema = z
+  .string()
+  .trim()
+  .min(7)
+  .max(32)
+  .regex(/^[+\d\s().-]+$/, "Enter a valid phone number")
+  .refine((value) => {
+    const digits = value.replace(/\D/g, "").length;
+    return digits >= 7 && digits <= 15;
+  }, "Phone number must include 7 to 15 digits");
+
 export const chatStreamInputSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   device_id: z.string().trim().min(2).max(120),
@@ -29,6 +47,15 @@ export const patchChatSchema = z.object({
 export const chatQuerySchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   device_id: z.string().trim().min(2).max(120)
+});
+
+export const visitorContactInputSchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80),
+  device_id: z.string().trim().min(2).max(120),
+  chat_id: z.string().uuid().optional(),
+  full_name: visitorNameSchema,
+  email: z.string().trim().email().max(160),
+  phone: visitorPhoneSchema
 });
 
 // Backward-compatible names used by API routes
