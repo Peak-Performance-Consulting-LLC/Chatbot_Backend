@@ -1,4 +1,10 @@
-import { assertChatOwnership, upsertVisitorContact } from "@/chat/repository";
+import {
+  assertChatOwnership,
+  getVisitorContactByTenantDevice,
+  insertChatMessage,
+  touchChatThread,
+  upsertVisitorContact
+} from "@/chat/repository";
 import { visitorContactInputSchema } from "@/chat/schemas";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
@@ -9,6 +15,12 @@ export const dynamic = "force-dynamic";
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
+}
+
+function toDisplayName(input: string) {
+  const trimmed = input.trim().replace(/\s+/g, " ");
+  if (!trimmed) return "there";
+  return trimmed.toLowerCase().replace(/\b\p{L}/gu, (letter) => letter.toUpperCase());
 }
 
 export async function POST(request: Request) {
@@ -28,6 +40,7 @@ export async function POST(request: Request) {
     }
 
     await assertTenantDomainAccess(request, parsed.data.tenant_id);
+    const existingContact = await getVisitorContactByTenantDevice(parsed.data.tenant_id, parsed.data.device_id);
 
     if (parsed.data.chat_id) {
       await assertChatOwnership(parsed.data.chat_id, parsed.data.tenant_id, parsed.data.device_id);
@@ -42,7 +55,18 @@ export async function POST(request: Request) {
       phone: parsed.data.phone
     });
 
-    return jsonCorsResponse(request, { ok: true, contact }, 200);
+    let greetingMessage = null;
+    if (!existingContact && parsed.data.chat_id) {
+      const displayName = toDisplayName(parsed.data.full_name);
+      greetingMessage = await insertChatMessage({
+        chat_id: parsed.data.chat_id,
+        role: "assistant",
+        content: `Thanks, ${displayName}. Nice to meet you. How can I help you next?`
+      });
+      await touchChatThread(parsed.data.chat_id);
+    }
+
+    return jsonCorsResponse(request, { ok: true, contact, greeting_message: greetingMessage }, 200);
   } catch (error) {
     const asHttpError = toHttpError(error);
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
