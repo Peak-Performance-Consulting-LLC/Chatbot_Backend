@@ -176,10 +176,61 @@ export function buildWidgetConfig(input: {
     iframe.style.borderRadius = '0';
   }
 
+  function applyPointerEvents(mode) {
+    if (mode === 'open' || mode === 'open-compact') {
+      iframe.style.pointerEvents = 'auto';
+    } else {
+      iframe.style.pointerEvents = 'none';
+    }
+  }
+
+  var hoverZone = document.createElement('div');
+  hoverZone.style.position = 'fixed';
+  hoverZone.style.zIndex = '2147483001';
+  hoverZone.style.cursor = 'pointer';
+  hoverZone.style.background = 'transparent';
+
+  function applyHoverZone() {
+    var sizing = resolveSizing();
+    hoverZone.style.bottom = '16px';
+    hoverZone.style.right = layout.widgetPosition === 'left' ? 'auto' : '16px';
+    hoverZone.style.left = layout.widgetPosition === 'left' ? '16px' : 'auto';
+    if (activeMode === 'peek') {
+      hoverZone.style.width = sizing.peekWidth + 'px';
+      hoverZone.style.height = sizing.peekHeight + 'px';
+    } else if (activeMode === 'launcher') {
+      hoverZone.style.width = sizing.launcherWidth + 'px';
+      hoverZone.style.height = sizing.launcherHeight + 'px';
+    } else {
+      hoverZone.style.width = '0';
+      hoverZone.style.height = '0';
+    }
+  }
+
+  hoverZone.addEventListener('mouseenter', function () {
+    iframe.style.pointerEvents = 'auto';
+    hoverZone.style.pointerEvents = 'none';
+  });
+  hoverZone.addEventListener('click', function () {
+    iframe.style.pointerEvents = 'auto';
+    hoverZone.style.pointerEvents = 'none';
+  });
+
+  iframe.addEventListener('mouseleave', function () {
+    if (activeMode !== 'open' && activeMode !== 'open-compact') {
+      iframe.style.pointerEvents = 'none';
+      hoverZone.style.pointerEvents = 'auto';
+    }
+  });
+
   applyState('launcher');
+  applyPointerEvents('launcher');
+  applyHoverZone();
   document.body.appendChild(iframe);
+  document.body.appendChild(hoverZone);
   window.addEventListener('resize', function () {
     applyState(activeMode);
+    applyHoverZone();
   });
 
   window.addEventListener('message', function (event) {
@@ -215,6 +266,7 @@ export function buildWidgetConfig(input: {
         layout.borderRadius = clamp(Math.round(nextLayout.borderRadius), 8, 36);
       }
       applyState(activeMode);
+      applyHoverZone();
       return;
     }
     if (event.data.type !== 'aeroconcierge:widget-state') return;
@@ -223,6 +275,14 @@ export function buildWidgetConfig(input: {
       nextMode = event.data.open ? 'open' : 'launcher';
     }
     applyState(nextMode);
+    applyPointerEvents(nextMode);
+    applyHoverZone();
+    if (nextMode === 'open' || nextMode === 'open-compact') {
+      hoverZone.style.pointerEvents = 'none';
+    } else {
+      hoverZone.style.pointerEvents = 'auto';
+      iframe.style.pointerEvents = 'none';
+    }
   });
 })();
 </script>`;
