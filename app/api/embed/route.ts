@@ -128,6 +128,10 @@ export async function GET(request: Request) {
   }
 
   function applyState(mode) {
+    if (mode === 'peek') {
+      mode = 'launcher';
+    }
+
     activeMode = mode;
     applyPosition();
     var sizing = resolveSizing();
@@ -245,6 +249,9 @@ export async function GET(request: Request) {
     var nextMode = event.data.mode;
     if (nextMode !== 'open' && nextMode !== 'open-compact' && nextMode !== 'peek' && nextMode !== 'launcher') {
       nextMode = event.data.open ? 'open' : 'launcher';
+    }
+    if (nextMode === 'peek') {
+      nextMode = 'launcher';
     }
     applyState(nextMode);
   });
