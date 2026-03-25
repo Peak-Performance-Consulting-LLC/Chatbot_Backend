@@ -128,9 +128,7 @@ export async function GET(request: Request) {
   }
 
   function applyState(mode) {
-    if (mode === 'peek') {
-      mode = 'launcher';
-    }
+  
 
     activeMode = mode;
     applyPosition();
