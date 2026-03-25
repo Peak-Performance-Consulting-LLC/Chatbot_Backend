@@ -55,6 +55,7 @@ export function buildWidgetConfig(input: {
   var layout = {
     widgetPosition: 'right',
     launcherStyle: 'rounded',
+    launcherIconOnly: true,
     botName: 'Chat with us',
     windowWidth: 520,
     windowHeight: 820,
@@ -97,8 +98,10 @@ export function buildWidgetConfig(input: {
     var desktopPeekHeight = 344;
     var desktopExpandedRadius = clamp(layout.borderRadius, 8, 36);
     var label = (layout.botName || 'Chat with us').trim();
-    var desktopLauncherWidth = clamp(124 + clamp(label.length, 6, 24) * 7, 190, 284);
-    var desktopLauncherHeight = layout.launcherStyle === 'minimal' ? 60 : 68;
+    var isIconOnly = Boolean(layout.launcherIconOnly);
+    var iconOnlySize = layout.launcherStyle === 'minimal' ? 54 : 58;
+    var desktopLauncherWidth = isIconOnly ? iconOnlySize : clamp(124 + clamp(label.length, 6, 24) * 7, 190, 284);
+    var desktopLauncherHeight = isIconOnly ? iconOnlySize : layout.launcherStyle === 'minimal' ? 60 : 68;
     var desktopLauncherRadius =
       layout.launcherStyle === 'square'
         ? 20
@@ -128,8 +131,8 @@ export function buildWidgetConfig(input: {
       compactHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 260), 340, 430),
       peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 40), 272, 320),
       peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 220), 220, 284),
-      launcherWidth: clamp(Math.min(desktopLauncherWidth, window.innerWidth - 36), 176, 236),
-      launcherHeight: layout.launcherStyle === 'minimal' ? 54 : 58,
+      launcherWidth: isIconOnly ? iconOnlySize : clamp(Math.min(desktopLauncherWidth, window.innerWidth - 36), 176, 236),
+      launcherHeight: isIconOnly ? iconOnlySize : layout.launcherStyle === 'minimal' ? 54 : 58,
       launcherRadius:
         layout.launcherStyle === 'square'
           ? 18
@@ -195,6 +198,9 @@ export function buildWidgetConfig(input: {
         nextLayout.launcherStyle === 'minimal'
       ) {
         layout.launcherStyle = nextLayout.launcherStyle;
+      }
+      if (typeof nextLayout.launcherIconOnly === 'boolean') {
+        layout.launcherIconOnly = nextLayout.launcherIconOnly;
       }
       if (typeof nextLayout.botName === 'string' && nextLayout.botName.trim()) {
         layout.botName = nextLayout.botName.trim().slice(0, 42);
