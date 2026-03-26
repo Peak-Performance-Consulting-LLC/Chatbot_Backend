@@ -69,8 +69,14 @@ export async function GET(request: Request) {
   }
 
   function applyPosition() {
-    iframe.style.right = layout.widgetPosition === 'left' ? 'auto' : '16px';
-    iframe.style.left = layout.widgetPosition === 'left' ? '16px' : 'auto';
+    var right = layout.widgetPosition === 'left' ? 'auto' : '16px';
+    var left = layout.widgetPosition === 'left' ? '16px' : 'auto';
+    iframe.style.right = right;
+    iframe.style.left = left;
+    if (hoverZone) {
+      hoverZone.style.right = right;
+      hoverZone.style.left = left;
+    }
   }
 
   function resolveSizing() {
@@ -128,8 +134,6 @@ export async function GET(request: Request) {
   }
 
   function applyState(mode) {
-  
-
     activeMode = mode;
     applyPosition();
     var sizing = resolveSizing();
@@ -247,9 +251,6 @@ export async function GET(request: Request) {
     var nextMode = event.data.mode;
     if (nextMode !== 'open' && nextMode !== 'open-compact' && nextMode !== 'peek' && nextMode !== 'launcher') {
       nextMode = event.data.open ? 'open' : 'launcher';
-    }
-    if (nextMode === 'peek') {
-      nextMode = 'launcher';
     }
     applyState(nextMode);
   });
