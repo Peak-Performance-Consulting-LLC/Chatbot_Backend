@@ -6,7 +6,6 @@ import {
   createChatThread,
   getVisitorContactByTenantDevice,
   insertChatMessage,
-  listRecentMessages,
   touchChatThread
 } from "@/chat/repository";
 import type { ChatMessage, ChatThread, MessageIntent, MessageMetadata } from "@/chat/types";
@@ -21,12 +20,7 @@ import { applyUserMessageToFlightState, isFlightStateComplete } from "@/flight/s
 import { clearFlightState, getFlightState, upsertFlightState } from "@/flight/stateStore";
 import type { FlightSearchState } from "@/flight/types";
 import { buildCollectingFlightUiMetadata, buildResultsFlightUiMetadata } from "@/flight/ui";
-import {
-  generateGeminiText,
-  streamGeminiReply,
-  type GeminiUsageSummary
-} from "@/llm/gemini";
-import { AEROCONCIERGE_SYSTEM_PROMPT, RUNTIME_POLICY_APPENDIX } from "@/llm/prompts";
+import type { GeminiUsageSummary } from "@/llm/gemini";
 import { getBaseCorsHeaders, jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { logError, logInfo } from "@/lib/logger";
@@ -38,7 +32,15 @@ import {
   insertPlatformUsageEvent,
   type PlatformUsageEventResponseSource
 } from "@/platform/repository";
-import { retrieveKnowledge } from "@/rag/retrieve";
+import {
+  generateBusinessInfoReply as aiGenerateBusinessInfoReply,
+  generateGreetingReply as aiGenerateGreetingReply,
+  generatePaymentReply as aiGeneratePaymentReply,
+  isBusinessInfoIntent as aiIsBusinessInfoIntent,
+  isSimpleGratitude as aiIsSimpleGratitude,
+  isSimpleGreeting as aiIsSimpleGreeting,
+  streamAIResponse
+} from "@/services/ai";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 import {
   buildServiceCollectingMetadata,
@@ -543,6 +545,9 @@ export async function POST(request: Request) {
 
     const input = parsed.data;
     const ip = getClientIp(request);
+    const dedupeKey = input.client_message_id
+      ? `visitor:${input.device_id}:${input.client_message_id.trim().toLowerCase()}`
+      : null;
 
     // Fix 1: Parallelize tenant auth + rate limit (saves ~500-800ms)
     const rateLimitKey = `${ip}:${input.device_id}:${input.tenant_id}`;
@@ -646,6 +651,60 @@ export async function POST(request: Request) {
       message: input.message
     });
     const chatId = thread.id;
+
+    // ── Phase 1: Mode Guard ────────────────────────────────────────
+    // If conversation is in agent_active, copilot, or handoff_pending mode,
+    // persist the visitor message and broadcast via Realtime.
+    // Do NOT generate an AI response.
+    const conversationMode = thread.conversation_mode ?? "ai_only";
+
+    if (
+      conversationMode === "agent_active" ||
+      conversationMode === "copilot" ||
+      conversationMode === "handoff_pending"
+    ) {
+      const visitorMessage = await insertChatMessage({
+        chat_id: chatId,
+        role: "user",
+        content: input.message,
+        sender_type: "visitor",
+        dedupe_key: dedupeKey,
+        metadata: {
+          tenant_id: input.tenant_id
+        }
+      });
+
+      await touchChatThread(chatId);
+
+      // Broadcast message to agent via Supabase Realtime
+      try {
+        const { broadcastMessage } = await import("@/services/notification");
+        await broadcastMessage(chatId, visitorMessage);
+      } catch (err) {
+        logError("realtime_visitor_message_broadcast_failed", {
+          request_id: requestId,
+          chat_id: chatId,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
+
+      // Return a simple JSON response (no SSE streaming needed)
+      return jsonCorsResponse(request, {
+        chat_id: chatId,
+        mode: conversationMode,
+        message_id: visitorMessage.id
+      });
+    }
+
+    if (conversationMode === "closed") {
+      return jsonCorsResponse(
+        request,
+        { error: "This conversation has been closed." },
+        409
+      );
+    }
+    // ── End Mode Guard ─────────────────────────────────────────────
+
     const contactCaptureState = await getContactCaptureState({
       tenantId: input.tenant_id,
       deviceId: input.device_id
@@ -701,7 +760,7 @@ export async function POST(request: Request) {
 
     // Run flight state lookup concurrently with intent detection prep
     const currentFlightState = await getFlightState(chatId);
-    const requestIntent: MessageIntent = isSimpleGreeting(input.message) || isSimpleGratitude(input.message)
+    const requestIntent: MessageIntent = aiIsSimpleGreeting(input.message) || aiIsSimpleGratitude(input.message)
       ? "greeting"
       : detectPaymentIntent(input.message)
       ? "payment_support"
@@ -714,6 +773,7 @@ export async function POST(request: Request) {
       chat_id: chatId,
       role: "user",
       content: input.message,
+      dedupe_key: dedupeKey,
       metadata: {
         intent: requestIntent,
         tenant_id: input.tenant_id,
@@ -765,13 +825,13 @@ export async function POST(request: Request) {
           hadResponseError = response.responseSource === "fallback";
         } else if (requestIntent === "payment_support") {
           assistantIntent = "payment_support";
-          const payment = buildPaymentSupportMessage(callCta);
+          const payment = aiGeneratePaymentReply(callCta);
           assistantText = payment.text;
           assistantMetadata = payment.metadata;
           streamTextInChunks(assistantText, writer.token);
         } else if (requestIntent === "greeting") {
           assistantIntent = "greeting";
-          const greeting = buildGreetingReply({
+          const greeting = aiGenerateGreetingReply({
             enabledServices: tenant.supported_services,
             callCta,
             message: input.message
@@ -781,8 +841,8 @@ export async function POST(request: Request) {
           streamTextInChunks(assistantText, writer.token);
         } else {
           assistantIntent = "knowledge";
-          if (tenant.business_description && isBusinessInfoIntent(input.message)) {
-            const company = buildBusinessDescriptionReply({
+          if (tenant.business_description && aiIsBusinessInfoIntent(input.message)) {
+            const company = aiGenerateBusinessInfoReply({
               tenantName: tenant.name?.trim() || tenant.bot_name,
               businessDescription: tenant.business_description,
               enabledServices: tenant.supported_services,
@@ -792,186 +852,22 @@ export async function POST(request: Request) {
             assistantMetadata = company.metadata;
             streamTextInChunks(assistantText, writer.token);
           } else {
-            let retrievedContext = "";
-            let sourceUrls: string[] = [];
-            let history: Array<{ role: "user" | "assistant"; content: string }> = [];
-
-            const [retrievalResult, recentMessagesResult] = await Promise.allSettled([
-              withTimeout(
-                (signal) =>
-                  retrieveKnowledge({
-                    tenantId: input.tenant_id,
-                    query: input.message,
-                    matchCount: KNOWLEDGE_MATCH_COUNT,
-                    maxChunks: KNOWLEDGE_MAX_CHUNKS,
-                    maxContextChars: KNOWLEDGE_MAX_CONTEXT_CHARS,
-                    minSimilarity: KNOWLEDGE_MIN_SIMILARITY,
-                    signal
-                  }),
-                KNOWLEDGE_RETRIEVAL_TIMEOUT_MS,
-                "Knowledge retrieval"
-              ),
-              input.chat_id
-                ? withTimeout(
-                    (signal) => listRecentMessages(chatId, 6, { signal }),
-                    HISTORY_LOAD_TIMEOUT_MS,
-                    "Chat history load"
-                  )
-                : Promise.resolve([] as ChatMessage[])
-            ]);
-
-            if (retrievalResult.status === "fulfilled") {
-              retrievedContext = retrievalResult.value.contextText.trim();
-              sourceUrls = retrievalResult.value.sourceUrls;
-            } else {
-              retrievedContext = "";
-              sourceUrls = [];
-              hadResponseError = true;
-
-              logError("rag_retrieval_failed", {
-                request_id: requestId,
-                chat_id: chatId,
-                tenant_id: input.tenant_id,
-                error:
-                  retrievalResult.reason instanceof Error
-                    ? retrievalResult.reason.message
-                    : String(retrievalResult.reason)
-              });
-            }
-
-            if (recentMessagesResult.status === "fulfilled") {
-              history = toHistory(recentMessagesResult.value).slice(0, -1);
-            } else {
-              hadResponseError = true;
-              logError("chat_history_load_failed", {
-                request_id: requestId,
-                chat_id: chatId,
-                tenant_id: input.tenant_id,
-                error:
-                  recentMessagesResult.reason instanceof Error
-                    ? recentMessagesResult.reason.message
-                    : String(recentMessagesResult.reason)
-              });
-            }
-
-            ragMatch = retrievedContext ? true : false;
-            assistantMetadata = {
-              call_cta: callCta,
-              source_urls: sourceUrls,
-              ...(retrievedContext ? {} : { no_rag_match: true })
-            };
-
-            if (!retrievedContext) {
-              responseSource = "fallback";
-              const fallback = buildNoKnowledgeMessage(callCta);
-              assistantText = fallback.text;
-              assistantMetadata = {
-                ...(assistantMetadata ?? {}),
-                ...fallback.metadata
-              };
-              streamTextInChunks(assistantText, writer.token);
-            } else {
-              let allowStreamingTokens = true;
-              try {
-                const streamed = await withTimeout(
-                  (signal) =>
-                    streamGeminiReply({
-                      systemPrompt: `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
-                      retrievedContext: [
-                        retrievedContext,
-                        `Support call number: ${callCta.number}`,
-                        `Support tel link: ${callCta.tel}`
-                      ].join("\n"),
-                      pageContext: input.page_context,
-                      history,
-                      userMessage: input.message,
-                      signal,
-                      timeoutMs: LLM_STREAM_TIMEOUT_MS,
-                      onToken: (token) => {
-                        if (allowStreamingTokens) {
-                          writer.token(token);
-                        }
-                      }
-                    }),
-                  LLM_STREAM_TIMEOUT_MS,
-                  "LLM stream"
-                );
-
-                assistantText = streamed.text;
-                usage = streamed.usage;
-                responseSource = "llm";
-
-                if (!assistantText) {
-                  hadResponseError = true;
-                  responseSource = "fallback";
-                  const fallback = buildNoKnowledgeMessage(callCta);
-                  assistantText = fallback.text;
-                  assistantMetadata = {
-                    ...(assistantMetadata ?? {}),
-                    ...fallback.metadata
-                  };
-                  streamTextInChunks(assistantText, writer.token);
-                }
-              } catch (error) {
-                allowStreamingTokens = false;
-                hadResponseError = true;
-                responseSource = "fallback";
-                logError("llm_generation_failed", {
-                  request_id: requestId,
-                  chat_id: chatId,
-                  tenant_id: input.tenant_id,
-                  error: error instanceof Error ? error.message : String(error)
-                });
-
-                const ragUserPrompt = buildRagUserPrompt({
-                  retrievedContext,
-                  callNumber: callCta.number,
-                  callTel: callCta.tel,
-                  userMessage: input.message,
-                  pageContext: input.page_context
-                });
-
-                try {
-                  const fallbackResult = await withTimeout(
-                    (signal) =>
-                      generateGeminiText(
-                        ragUserPrompt,
-                        `${AEROCONCIERGE_SYSTEM_PROMPT}\n\n${RUNTIME_POLICY_APPENDIX}`,
-                        {
-                          signal,
-                          timeoutMs: LLM_FALLBACK_TIMEOUT_MS
-                        }
-                      ),
-                    LLM_FALLBACK_TIMEOUT_MS,
-                    "LLM fallback"
-                  );
-
-                  assistantText = fallbackResult.text;
-                  usage = fallbackResult.usage;
-
-                  if (!assistantText) {
-                    throw new Error("LLM non-stream fallback returned empty text");
-                  }
-
-                  streamTextInChunks(assistantText, writer.token);
-                } catch (fallbackError) {
-                  logError("llm_generation_fallback_failed", {
-                    request_id: requestId,
-                    chat_id: chatId,
-                    tenant_id: input.tenant_id,
-                    error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
-                  });
-
-                  assistantText =
-                    `I'm unable to access support responses right now. ` +
-                    `Please try again shortly, or connect at [${callCta.number}](${callCta.tel}).`;
-                  assistantMetadata = {
-                    call_cta: callCta
-                  };
-                  streamTextInChunks(assistantText, writer.token);
-                }
-              }
-            }
+            const aiResponse = await streamAIResponse({
+              chatId,
+              tenantId: input.tenant_id,
+              userMessage: input.message,
+              callCta,
+              requestId,
+              pageContext: input.page_context,
+              writeToken: writer.token,
+              loadHistory: Boolean(input.chat_id)
+            });
+            assistantText = aiResponse.text;
+            assistantMetadata = aiResponse.metadata;
+            usage = aiResponse.usage;
+            responseSource = aiResponse.responseSource;
+            ragMatch = aiResponse.ragMatch;
+            hadResponseError = aiResponse.hadResponseError;
           }
         }
 
@@ -1009,6 +905,7 @@ export async function POST(request: Request) {
               chat_id: chatId,
               role: "assistant",
               content: assistantText,
+              dedupe_key: dedupeKey ? `assistant:${dedupeKey}` : null,
               metadata: {
                 intent: assistantIntent,
                 tenant_id: input.tenant_id,

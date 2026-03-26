@@ -1,5 +1,22 @@
 export type ChatRole = "user" | "assistant" | "system";
 
+export type ConversationMode =
+  | "ai_only"
+  | "handoff_pending"
+  | "agent_active"
+  | "copilot"
+  | "returned_to_ai"
+  | "closed";
+
+export type ConversationStatus =
+  | "active"
+  | "waiting"
+  | "assigned"
+  | "closed"
+  | "archived";
+
+export type SenderType = "visitor" | "ai" | "agent" | "system";
+
 export type MessageIntent =
   | "flight_search"
   | "knowledge"
@@ -80,9 +97,28 @@ export type MessageMetadata = {
 export type ChatThread = {
   id: string;
   tenant_id: string;
+  workspace_id: string | null;
+  queue_id: string | null;
   device_id: string;
   title: string;
   summary: string | null;
+  conversation_mode: ConversationMode;
+  conversation_status: ConversationStatus;
+  assigned_agent_id: string | null;
+  handoff_requested_at: string | null;
+  assigned_at: string | null;
+  closed_at: string | null;
+  priority: number;
+  sla_breached: boolean;
+  sla_started_at: string | null;
+  sla_first_response_due_at: string | null;
+  first_agent_response_at: string | null;
+  sla_warning_sent_at: string | null;
+  sla_breached_at: string | null;
+  overflowed_at: string | null;
+  visitor_is_vip: boolean;
+  routing_skill: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
   last_message_at: string;
@@ -94,5 +130,22 @@ export type ChatMessage = {
   role: ChatRole;
   content: string;
   metadata: MessageMetadata | null;
+  sender_type: SenderType;
+  sender_id: string | null;
+  is_internal: boolean;
+  is_draft: boolean;
+  dedupe_key: string | null;
+  created_at: string;
+};
+
+export type ConversationEvent = {
+  id: string;
+  chat_id: string;
+  event_type: string;
+  actor_id: string | null;
+  actor_type: string | null;
+  old_mode: ConversationMode | null;
+  new_mode: ConversationMode | null;
+  metadata: Record<string, unknown>;
   created_at: string;
 };

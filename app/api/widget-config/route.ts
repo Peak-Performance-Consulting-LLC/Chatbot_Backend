@@ -56,7 +56,9 @@ export async function GET(request: Request) {
         notifEnabled: tenant.notif_enabled,
         notifText: tenant.notif_text,
         notifAnimation: tenant.notif_animation,
-        notifChips: tenant.notif_chips
+        notifChips: tenant.notif_chips,
+        csatEnabled: tenant.csat_enabled,
+        csatPrompt: tenant.csat_prompt
       },
       supportPhone: tenant.support_phone || undefined,
       supportCtaLabel: tenant.support_cta_label,

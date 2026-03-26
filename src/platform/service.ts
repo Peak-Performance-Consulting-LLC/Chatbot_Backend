@@ -25,6 +25,10 @@ import {
   getPlatformUsageTrackingStartedAt,
   listTenantSources,
   listPlatformAnalyticsMessages,
+  listPlatformAnalyticsConversations,
+  listPlatformAnalyticsCsat,
+  listPlatformActiveAssignedChats,
+  listPlatformAgentCapacitySnapshots,
   listPlatformUsageEvents,
   listTenantVisitorContacts,
   listUserTenants,
@@ -32,6 +36,9 @@ import {
   resolvePlatformSession,
   syncSubscriptionFromStripe,
   type PlatformAnalyticsMessageRow,
+  type PlatformAnalyticsConversationRow,
+  type PlatformAnalyticsCsatRow,
+  type PlatformAgentCapacitySnapshotRow,
   type PlatformAnalyticsUsageRow,
   type PlatformVisitorContactRow,
   type SubscriptionSummary,
@@ -522,6 +529,8 @@ export async function updatePlatformTenantProfile(input: {
   notif_text?: string;
   notif_animation?: "bounce" | "pulse" | "slide";
   notif_chips?: string[];
+  csat_enabled?: boolean;
+  csat_prompt?: string;
 }) {
   const user = await resolvePlatformSession(input.token);
   await assertTenantOwnership(user.id, input.tenant_id);
@@ -555,7 +564,9 @@ export async function updatePlatformTenantProfile(input: {
     notif_enabled: input.notif_enabled,
     notif_text: input.notif_text,
     notif_animation: input.notif_animation,
-    notif_chips: input.notif_chips
+    notif_chips: input.notif_chips,
+    csat_enabled: input.csat_enabled,
+    csat_prompt: input.csat_prompt
   } satisfies Partial<TenantBusinessProfile>);
 
   const tenant = await getOwnedTenantSummary(user.id, input.tenant_id);
@@ -917,6 +928,7 @@ export type PlatformAnalyticsRange = "7d" | "30d" | "billing_cycle";
 
 export type PlatformAnalyticsSummary = {
   conversations: number;
+  vip_conversations: number;
   messages_total: number;
   user_messages: number;
   assistant_messages: number;
@@ -925,6 +937,11 @@ export type PlatformAnalyticsSummary = {
   tokens_exact: number;
   tokens_estimated: number;
   avg_response_ms: number | null;
+  avg_first_response_seconds: number | null;
+  avg_handle_seconds: number | null;
+  agent_utilization_ratio: number | null;
+  csat_avg_rating: number | null;
+  csat_responses: number;
   message_quota_used: number;
   message_quota_limit: number;
 };
@@ -944,6 +961,9 @@ export type PlatformAnalyticsWorkspaceRow = {
   tokens_total: number;
   conversations: number;
   unique_visitors: number;
+  avg_first_response_seconds: number | null;
+  avg_handle_seconds: number | null;
+  agent_utilization_ratio: number | null;
 };
 
 export type PlatformAnalyticsBreakdownRow = {
@@ -1145,10 +1165,81 @@ function filterUsageEventsByDateRange(
   });
 }
 
+function filterConversationsByDateRange(
+  rows: PlatformAnalyticsConversationRow[],
+  timezone: string,
+  startKey: string,
+  endKey: string
+) {
+  return rows.filter((row) => {
+    const dateKey = toDateKey(row.created_at, timezone);
+    return dateKey >= startKey && dateKey <= endKey;
+  });
+}
+
+function filterCsatByDateRange(
+  rows: PlatformAnalyticsCsatRow[],
+  timezone: string,
+  startKey: string,
+  endKey: string
+) {
+  return rows.filter((row) => {
+    const dateKey = toDateKey(row.submitted_at, timezone);
+    return dateKey >= startKey && dateKey <= endKey;
+  });
+}
+
+function calculateAgentUtilization(input: {
+  tenantIds: string[];
+  capacities: PlatformAgentCapacitySnapshotRow[];
+  activeAssigned: Array<{ tenant_id: string; assigned_agent_id: string }>;
+}): number | null {
+  if (input.tenantIds.length === 0) {
+    return null;
+  }
+
+  const capacityByAgent = new Map<string, number>();
+  for (const row of input.capacities) {
+    if (!input.tenantIds.includes(row.tenant_id)) {
+      continue;
+    }
+    const key = `${row.tenant_id}:${row.user_id}`;
+    const current = capacityByAgent.get(key) ?? 0;
+    capacityByAgent.set(key, Math.max(current, row.max_concurrent_chats));
+  }
+
+  let totalCapacity = 0;
+  for (const value of capacityByAgent.values()) {
+    totalCapacity += Math.max(0, value);
+  }
+  if (totalCapacity <= 0) {
+    return null;
+  }
+
+  const activeByAgent = new Map<string, number>();
+  for (const row of input.activeAssigned) {
+    if (!input.tenantIds.includes(row.tenant_id)) {
+      continue;
+    }
+    const key = `${row.tenant_id}:${row.assigned_agent_id}`;
+    activeByAgent.set(key, (activeByAgent.get(key) ?? 0) + 1);
+  }
+
+  let totalActive = 0;
+  for (const value of activeByAgent.values()) {
+    totalActive += Math.max(0, value);
+  }
+
+  return totalCapacity > 0 ? Math.min(1, totalActive / totalCapacity) : null;
+}
+
 function buildWorkspaceRows(input: {
   tenantMap: Map<string, TenantSummary>;
   messages: PlatformAnalyticsMessageRow[];
   usageEvents: PlatformAnalyticsUsageRow[];
+  conversations: PlatformAnalyticsConversationRow[];
+  capacities: PlatformAgentCapacitySnapshotRow[];
+  activeAssigned: Array<{ tenant_id: string; assigned_agent_id: string }>;
 }): PlatformAnalyticsWorkspaceRow[] {
   const usageByTenant = new Map<
     string,
@@ -1157,6 +1248,10 @@ function buildWorkspaceRows(input: {
       tokens_total: number;
       conversations: Set<string>;
       unique_visitors: Set<string>;
+      firstResponseTotalSeconds: number;
+      firstResponseSamples: number;
+      handleTotalSeconds: number;
+      handleSamples: number;
     }
   >();
 
@@ -1167,7 +1262,11 @@ function buildWorkspaceRows(input: {
         messages_total: 0,
         tokens_total: 0,
         conversations: new Set<string>(),
-        unique_visitors: new Set<string>()
+        unique_visitors: new Set<string>(),
+        firstResponseTotalSeconds: 0,
+        firstResponseSamples: 0,
+        handleTotalSeconds: 0,
+        handleSamples: 0
       };
       usageByTenant.set(row.tenant_id, summary);
     }
@@ -1186,7 +1285,11 @@ function buildWorkspaceRows(input: {
         messages_total: 0,
         tokens_total: 0,
         conversations: new Set<string>(),
-        unique_visitors: new Set<string>()
+        unique_visitors: new Set<string>(),
+        firstResponseTotalSeconds: 0,
+        firstResponseSamples: 0,
+        handleTotalSeconds: 0,
+        handleSamples: 0
       };
       usageByTenant.set(row.tenant_id, summary);
     }
@@ -1194,16 +1297,65 @@ function buildWorkspaceRows(input: {
     summary.tokens_total += row.total_tokens ?? 0;
   }
 
+  for (const row of input.conversations) {
+    let summary = usageByTenant.get(row.tenant_id);
+    if (!summary) {
+      summary = {
+        messages_total: 0,
+        tokens_total: 0,
+        conversations: new Set<string>(),
+        unique_visitors: new Set<string>(),
+        firstResponseTotalSeconds: 0,
+        firstResponseSamples: 0,
+        handleTotalSeconds: 0,
+        handleSamples: 0
+      };
+      usageByTenant.set(row.tenant_id, summary);
+    }
+
+    if (row.handoff_requested_at && row.first_agent_response_at) {
+      const start = new Date(row.handoff_requested_at).getTime();
+      const end = new Date(row.first_agent_response_at).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        summary.firstResponseTotalSeconds += Math.round((end - start) / 1000);
+        summary.firstResponseSamples += 1;
+      }
+    }
+
+    if (row.assigned_at && row.closed_at) {
+      const start = new Date(row.assigned_at).getTime();
+      const end = new Date(row.closed_at).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        summary.handleTotalSeconds += Math.round((end - start) / 1000);
+        summary.handleSamples += 1;
+      }
+    }
+  }
+
   return Array.from(usageByTenant.entries())
     .map(([tenantId, summary]) => {
       const tenant = input.tenantMap.get(tenantId);
+      const utilization = calculateAgentUtilization({
+        tenantIds: [tenantId],
+        capacities: input.capacities,
+        activeAssigned: input.activeAssigned
+      });
       return {
         tenant_id: tenantId,
         name: tenant?.name?.trim() || tenant?.business_profile.bot_name || tenantId,
         messages_total: summary.messages_total,
         tokens_total: summary.tokens_total,
         conversations: summary.conversations.size,
-        unique_visitors: summary.unique_visitors.size
+        unique_visitors: summary.unique_visitors.size,
+        avg_first_response_seconds:
+          summary.firstResponseSamples > 0
+            ? Math.round(summary.firstResponseTotalSeconds / summary.firstResponseSamples)
+            : null,
+        avg_handle_seconds:
+          summary.handleSamples > 0
+            ? Math.round(summary.handleTotalSeconds / summary.handleSamples)
+            : null,
+        agent_utilization_ratio: utilization
       };
     })
     .filter((row) => row.messages_total > 0 || row.tokens_total > 0)
@@ -1235,6 +1387,11 @@ function buildHealthSummary(tenants: TenantSummary[]): PlatformAnalyticsHealth {
 function aggregateAnalyticsScope(input: {
   messages: PlatformAnalyticsMessageRow[];
   usageEvents: PlatformAnalyticsUsageRow[];
+  conversations: PlatformAnalyticsConversationRow[];
+  csatRows: PlatformAnalyticsCsatRow[];
+  tenantIds: string[];
+  capacities: PlatformAgentCapacitySnapshotRow[];
+  activeAssigned: Array<{ tenant_id: string; assigned_agent_id: string }>;
   bucketKeys: string[];
   timezone: string;
   messageQuotaUsed: number;
@@ -1261,6 +1418,7 @@ function aggregateAnalyticsScope(input: {
 
   let userMessages = 0;
   let assistantMessages = 0;
+  let vipConversations = 0;
   const conversations = new Set<string>();
   const uniqueVisitors = new Set<string>();
 
@@ -1297,6 +1455,10 @@ function aggregateAnalyticsScope(input: {
   ]);
   let knowledgeTotal = 0;
   let knowledgeHits = 0;
+  let firstResponseTotalSeconds = 0;
+  let firstResponseSamples = 0;
+  let handleTotalSeconds = 0;
+  let handleSamples = 0;
 
   for (const row of input.usageEvents) {
     const totalTokens = row.total_tokens ?? 0;
@@ -1332,7 +1494,50 @@ function aggregateAnalyticsScope(input: {
     }
   }
 
+  for (const row of input.conversations) {
+    if (row.visitor_is_vip) {
+      vipConversations += 1;
+    }
+
+    if (row.handoff_requested_at && row.first_agent_response_at) {
+      const start = new Date(row.handoff_requested_at).getTime();
+      const end = new Date(row.first_agent_response_at).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        firstResponseTotalSeconds += Math.round((end - start) / 1000);
+        firstResponseSamples += 1;
+      }
+    }
+
+    if (row.assigned_at && row.closed_at) {
+      const start = new Date(row.assigned_at).getTime();
+      const end = new Date(row.closed_at).getTime();
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        handleTotalSeconds += Math.round((end - start) / 1000);
+        handleSamples += 1;
+      }
+    }
+  }
+
   const avgResponseMs = latencyCount > 0 ? Math.round(latencySum / latencyCount) : null;
+  const avgFirstResponseSeconds =
+    firstResponseSamples > 0 ? Math.round(firstResponseTotalSeconds / firstResponseSamples) : null;
+  const avgHandleSeconds =
+    handleSamples > 0 ? Math.round(handleTotalSeconds / handleSamples) : null;
+  const csatResponses = input.csatRows.length;
+  const csatAvgRating =
+    csatResponses > 0
+      ? Number(
+          (
+            input.csatRows.reduce((sum, row) => sum + row.rating, 0) /
+            csatResponses
+          ).toFixed(2)
+        )
+      : null;
+  const agentUtilization = calculateAgentUtilization({
+    tenantIds: input.tenantIds,
+    capacities: input.capacities,
+    activeAssigned: input.activeAssigned
+  });
   const trend = input.bucketKeys.map((bucketKey) => {
     const bucket = bucketMap.get(bucketKey);
     return {
@@ -1347,6 +1552,7 @@ function aggregateAnalyticsScope(input: {
   return {
     summary: {
       conversations: conversations.size,
+      vip_conversations: vipConversations,
       messages_total: input.messages.length,
       user_messages: userMessages,
       assistant_messages: assistantMessages,
@@ -1355,6 +1561,11 @@ function aggregateAnalyticsScope(input: {
       tokens_exact: tokensExact,
       tokens_estimated: tokensEstimated,
       avg_response_ms: avgResponseMs,
+      avg_first_response_seconds: avgFirstResponseSeconds,
+      avg_handle_seconds: avgHandleSeconds,
+      agent_utilization_ratio: agentUtilization,
+      csat_avg_rating: csatAvgRating,
+      csat_responses: csatResponses,
       message_quota_used: input.messageQuotaUsed,
       message_quota_limit: input.messageQuotaLimit
     },
@@ -1463,7 +1674,16 @@ export async function getPlatformAnalytics(input: {
   const ownedTenantIds = tenants.map((tenant) => tenant.tenant_id);
   const rangeWindow = getAnalyticsDateRange(input.range, subscription, timezone);
 
-  const [rangeMessages, rangeUsageEvents, currentPeriodMessages, tokenTrackingStartedAt] =
+  const [
+    rangeMessages,
+    rangeUsageEvents,
+    rangeConversations,
+    rangeCsat,
+    utilizationCapacities,
+    utilizationActiveAssigned,
+    currentPeriodMessages,
+    tokenTrackingStartedAt
+  ] =
     await Promise.all([
       listPlatformAnalyticsMessages({
         tenant_ids: ownedTenantIds,
@@ -1474,6 +1694,22 @@ export async function getPlatformAnalytics(input: {
         tenant_ids: ownedTenantIds,
         start_at: rangeWindow.queryStartAt,
         end_at: rangeWindow.endAt
+      }),
+      listPlatformAnalyticsConversations({
+        tenant_ids: ownedTenantIds,
+        start_at: rangeWindow.queryStartAt,
+        end_at: rangeWindow.endAt
+      }),
+      listPlatformAnalyticsCsat({
+        tenant_ids: ownedTenantIds,
+        start_at: rangeWindow.queryStartAt,
+        end_at: rangeWindow.endAt
+      }),
+      listPlatformAgentCapacitySnapshots({
+        tenant_ids: ownedTenantIds
+      }),
+      listPlatformActiveAssignedChats({
+        tenant_ids: ownedTenantIds
       }),
       listPlatformAnalyticsMessages({
         tenant_ids: ownedTenantIds,
@@ -1496,10 +1732,27 @@ export async function getPlatformAnalytics(input: {
     rangeWindow.startKey,
     rangeWindow.endKey
   );
+  const filteredRangeConversations = filterConversationsByDateRange(
+    rangeConversations,
+    timezone,
+    rangeWindow.startKey,
+    rangeWindow.endKey
+  );
+  const filteredRangeCsat = filterCsatByDateRange(
+    rangeCsat,
+    timezone,
+    rangeWindow.startKey,
+    rangeWindow.endKey
+  );
 
   const accountScope = aggregateAnalyticsScope({
     messages: filteredRangeMessages,
     usageEvents: filteredRangeUsageEvents,
+    conversations: filteredRangeConversations,
+    csatRows: filteredRangeCsat,
+    tenantIds: ownedTenantIds,
+    capacities: utilizationCapacities,
+    activeAssigned: utilizationActiveAssigned,
     bucketKeys: rangeWindow.bucketKeys,
     timezone,
     messageQuotaUsed: currentPeriodUserMessageCount,
@@ -1511,6 +1764,12 @@ export async function getPlatformAnalytics(input: {
     : [];
   const workspaceUsageEvents = selectedTenant
     ? filteredRangeUsageEvents.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+  const workspaceConversations = selectedTenant
+    ? filteredRangeConversations.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+  const workspaceCsat = selectedTenant
+    ? filteredRangeCsat.filter((row) => row.tenant_id === selectedTenant.tenant_id)
     : [];
   const workspaceCurrentPeriodMessages = selectedTenant
     ? currentPeriodMessages.filter((row) => row.tenant_id === selectedTenant.tenant_id)
@@ -1529,7 +1788,10 @@ export async function getPlatformAnalytics(input: {
       workspaces: buildWorkspaceRows({
         tenantMap,
         messages: filteredRangeMessages,
-        usageEvents: filteredRangeUsageEvents
+        usageEvents: filteredRangeUsageEvents,
+        conversations: filteredRangeConversations,
+        capacities: utilizationCapacities,
+        activeAssigned: utilizationActiveAssigned
       }),
       health: buildHealthSummary(tenants)
     },
@@ -1543,6 +1805,11 @@ export async function getPlatformAnalytics(input: {
           ...aggregateAnalyticsScope({
             messages: workspaceMessages,
             usageEvents: workspaceUsageEvents,
+            conversations: workspaceConversations,
+            csatRows: workspaceCsat,
+            tenantIds: [selectedTenant.tenant_id],
+            capacities: utilizationCapacities,
+            activeAssigned: utilizationActiveAssigned,
             bucketKeys: rangeWindow.bucketKeys,
             timezone,
             messageQuotaUsed: workspaceCurrentPeriodUserMessages.length,

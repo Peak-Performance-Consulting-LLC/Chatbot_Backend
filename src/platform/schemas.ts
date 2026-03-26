@@ -105,7 +105,9 @@ export const platformTenantProfileSchema = z.object({
   notif_enabled: z.boolean().optional(),
   notif_text: z.string().trim().min(1).max(60).optional(),
   notif_animation: notifAnimationSchema.optional(),
-  notif_chips: z.array(z.string().trim().min(1).max(40)).max(4).optional()
+  notif_chips: z.array(z.string().trim().min(1).max(40)).max(4).optional(),
+  csat_enabled: z.boolean().optional(),
+  csat_prompt: z.string().trim().min(8).max(180).optional()
 });
 
 export const platformTenantDomainSchema = z.object({
@@ -145,6 +147,12 @@ export const platformTenantSourcesSchema = z.object({
 
 export const platformDeleteWorkspaceSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80)
+});
+
+export const platformRetentionPatchSchema = z.object({
+  conversation_retention_days: z.number().int().min(30).max(3650).optional(),
+  retention_purge_grace_days: z.number().int().min(0).max(3650).optional(),
+  allow_conversation_export: z.boolean().optional()
 });
 
 export const platformUpdateUserSchema = z.object({
@@ -198,5 +206,67 @@ export const platformVisitorContactsQuerySchema = z.object({
       return Number.isFinite(parsed) ? parsed : 0;
     },
     z.number().int().min(0).max(10_000)
+  )
+});
+
+export const platformConversationExportQuerySchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80),
+  format: z.preprocess(
+    (value) => (typeof value === "string" ? value.trim().toLowerCase() : value),
+    z.enum(["json", "csv"]).optional().default("json")
+  ),
+  start_at: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
+    z.string().datetime().optional()
+  ),
+  end_at: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
+    z.string().datetime().optional()
+  ),
+  include_messages: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return true;
+      }
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        return normalized === "1" || normalized === "true" || normalized === "yes";
+      }
+      return Boolean(value);
+    },
+    z.boolean()
+  ),
+  include_events: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return true;
+      }
+      if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        return normalized === "1" || normalized === "true" || normalized === "yes";
+      }
+      return Boolean(value);
+    },
+    z.boolean()
+  ),
+  limit: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return 500;
+      }
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 500;
+    },
+    z.number().int().min(1).max(5000)
+  ),
+  offset: z.preprocess(
+    (value) => {
+      if (value === null || value === undefined || value === "") {
+        return 0;
+      }
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    },
+    z.number().int().min(0).max(100_000)
   )
 });

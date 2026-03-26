@@ -69,7 +69,38 @@ function isMissingTableErrorMessage(message: string): boolean {
     message.includes("Could not find the table 'public.platform_usage_events'") ||
     message.includes('relation "public.platform_usage_events" does not exist') ||
     message.includes("Could not find the table 'public.visitor_contacts'") ||
-    message.includes('relation "public.visitor_contacts" does not exist')
+    message.includes('relation "public.visitor_contacts" does not exist') ||
+    message.includes("Could not find the table 'public.workspace_members'") ||
+    message.includes("Could not find the table 'public.queues'") ||
+    message.includes("Could not find the table 'public.queue_members'") ||
+    message.includes("Could not find the table 'public.agent_presence'") ||
+    message.includes("Could not find the table 'public.workspace_invitations'") ||
+    message.includes("Could not find the table 'public.audit_logs'") ||
+    message.includes('relation "public.workspace_members" does not exist') ||
+    message.includes('relation "public.queues" does not exist') ||
+    message.includes('relation "public.queue_members" does not exist') ||
+    message.includes('relation "public.agent_presence" does not exist') ||
+    message.includes('relation "public.workspace_invitations" does not exist') ||
+    message.includes('relation "public.audit_logs" does not exist') ||
+    message.includes("column chats.workspace_id does not exist") ||
+    message.includes("column chats.queue_id does not exist") ||
+    message.includes("column platform_subscriptions.max_seats does not exist") ||
+    message.includes("column chats.visitor_is_vip does not exist") ||
+    message.includes("column chats.routing_skill does not exist") ||
+    message.includes("column chats.archived_at does not exist") ||
+    message.includes("column messages.dedupe_key does not exist") ||
+    message.includes("column queue_members.skills does not exist") ||
+    message.includes("column queue_members.handles_vip does not exist") ||
+    message.includes("column queue_members.last_assigned_at does not exist") ||
+    message.includes("column queues.routing_strategy does not exist") ||
+    message.includes("column queues.is_vip_queue does not exist") ||
+    message.includes("column tenants.conversation_retention_days does not exist") ||
+    message.includes("column tenants.retention_purge_grace_days does not exist") ||
+    message.includes("column tenants.allow_conversation_export does not exist") ||
+    message.includes("column tenants.csat_enabled does not exist") ||
+    message.includes("column tenants.csat_prompt does not exist") ||
+    message.includes("Could not find the table 'public.conversation_csat'") ||
+    message.includes('relation "public.conversation_csat" does not exist')
   );
 }
 
@@ -182,6 +213,8 @@ export type TenantBusinessProfile = {
   notif_text: string;
   notif_animation: NotifAnimation;
   notif_chips: string[];
+  csat_enabled: boolean;
+  csat_prompt: string;
 };
 
 export type TenantKnowledgeState = {
@@ -190,12 +223,20 @@ export type TenantKnowledgeState = {
   last_ingested_at: string | null;
 };
 
+export type TenantRetentionSettings = {
+  conversation_retention_days: number;
+  retention_purge_grace_days: number;
+  allow_conversation_export: boolean;
+};
+
 export type TenantSummary = {
   tenant_id: string;
   name: string | null;
   allowed_domains: string[];
+  workspace_role?: WorkspaceRole | null;
   business_profile: TenantBusinessProfile;
   knowledge_base: TenantKnowledgeState;
+  retention: TenantRetentionSettings;
   domain_verification: {
     status: DomainVerificationStatus;
     txt_name: string;
@@ -230,6 +271,20 @@ export type PlatformUserSummary = {
 export type PlatformSession = {
   token: string;
   expires_at: string;
+};
+
+export type WorkspaceRole = "owner" | "admin" | "supervisor" | "agent" | "viewer";
+
+export type WorkspaceInvitationRecord = {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: WorkspaceRole;
+  token_hash: string;
+  invited_by: string | null;
+  expires_at: string;
+  accepted_at: string | null;
+  created_at: string;
 };
 
 function normalizeSupportedServices(input?: string[] | null): SupportedService[] {
@@ -550,7 +605,9 @@ function normalizeBusinessProfile(
     notif_enabled: input?.notif_enabled ?? true,
     notif_text: input?.notif_text?.trim() || "👋 Need help?",
     notif_animation: normalizeNotifAnimation(input?.notif_animation),
-    notif_chips: normalizeStringList(input?.notif_chips, defaultNotifChips, 4, 40)
+    notif_chips: normalizeStringList(input?.notif_chips, defaultNotifChips, 4, 40),
+    csat_enabled: input?.csat_enabled ?? true,
+    csat_prompt: input?.csat_prompt?.trim() || "How was your support experience?"
   };
 }
 
@@ -1049,14 +1106,16 @@ export async function createTenantForUser(input: {
     notif_enabled: businessProfile.notif_enabled,
     notif_text: businessProfile.notif_text,
     notif_animation: businessProfile.notif_animation,
-    notif_chips: businessProfile.notif_chips
+    notif_chips: businessProfile.notif_chips,
+    csat_enabled: businessProfile.csat_enabled,
+    csat_prompt: businessProfile.csat_prompt
   };
 
   const { data: tenant, error: tenantError } = await supabaseAdmin
     .from("tenants")
     .insert(tenantPayload)
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips, csat_enabled, csat_prompt"
     )
     .single();
 
@@ -1073,6 +1132,23 @@ export async function createTenantForUser(input: {
 
   if (linkError) {
     throw new HttpError(500, `Failed to link tenant ownership: ${linkError.message}`);
+  }
+
+  const { error: memberError } = await supabaseAdmin
+    .from("workspace_members")
+    .upsert(
+      {
+        workspace_id: tenantId,
+        user_id: input.userId,
+        role: "owner",
+        is_active: true,
+        created_by: input.userId
+      },
+      { onConflict: "workspace_id,user_id" }
+    );
+
+  if (memberError) {
+    throwPlatformSchemaMissingError(`Failed to create workspace owner membership: ${memberError.message}`);
   }
 
   const tenantRow = tenant as {
@@ -1108,6 +1184,8 @@ export async function createTenantForUser(input: {
     notif_text: string | null;
     notif_animation: string | null;
     notif_chips: string[] | null;
+    csat_enabled: boolean | null;
+    csat_prompt: string | null;
   };
 
   return {
@@ -1144,7 +1222,9 @@ export async function createTenantForUser(input: {
         notif_enabled: tenantRow.notif_enabled ?? undefined,
         notif_text: tenantRow.notif_text || undefined,
         notif_animation: tenantRow.notif_animation as NotifAnimation | undefined,
-        notif_chips: tenantRow.notif_chips || undefined
+        notif_chips: tenantRow.notif_chips || undefined,
+        csat_enabled: tenantRow.csat_enabled ?? undefined,
+        csat_prompt: tenantRow.csat_prompt || undefined
       },
       { companyName: tenantRow.name }
     )
@@ -1165,6 +1245,260 @@ export async function assertTenantOwnership(userId: string, tenantId: string): P
 
   if (!data?.tenant_id) {
     throw new HttpError(403, "Tenant access denied");
+  }
+}
+
+export async function assertWorkspaceMembership(userId: string, workspaceId: string): Promise<void> {
+  const [ownership, membership] = await Promise.all([
+    supabaseAdmin
+      .from("platform_user_tenants")
+      .select("tenant_id")
+      .eq("user_id", userId)
+      .eq("tenant_id", workspaceId)
+      .maybeSingle(),
+    supabaseAdmin
+      .from("workspace_members")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .maybeSingle()
+  ]);
+
+  if (ownership.error) {
+    throwPlatformSchemaMissingError(`Failed to check workspace ownership: ${ownership.error.message}`);
+  }
+  if (membership.error) {
+    throwPlatformSchemaMissingError(`Failed to check workspace membership: ${membership.error.message}`);
+  }
+
+  if (!ownership.data?.tenant_id && !membership.data?.id) {
+    throw new HttpError(403, "Workspace access denied");
+  }
+}
+
+export async function getWorkspaceRoleForUser(
+  userId: string,
+  workspaceId: string
+): Promise<WorkspaceRole | null> {
+  const [ownership, membership] = await Promise.all([
+    supabaseAdmin
+      .from("platform_user_tenants")
+      .select("tenant_id")
+      .eq("user_id", userId)
+      .eq("tenant_id", workspaceId)
+      .maybeSingle(),
+    supabaseAdmin
+      .from("workspace_members")
+      .select("role, is_active")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", userId)
+      .maybeSingle()
+  ]);
+
+  if (ownership.error) {
+    throwPlatformSchemaMissingError(`Failed to check workspace ownership: ${ownership.error.message}`);
+  }
+  if (membership.error) {
+    throwPlatformSchemaMissingError(`Failed to check workspace membership role: ${membership.error.message}`);
+  }
+
+  if (ownership.data?.tenant_id) {
+    return "owner";
+  }
+
+  const member = membership.data as { role?: string | null; is_active?: boolean | null } | null;
+  if (!member?.is_active || !member.role) {
+    return null;
+  }
+
+  const role = member.role.trim().toLowerCase();
+  if (role === "owner" || role === "admin" || role === "supervisor" || role === "agent" || role === "viewer") {
+    return role;
+  }
+
+  return "agent";
+}
+
+export async function listWorkspaceRolesForUser(
+  userId: string
+): Promise<Map<string, WorkspaceRole>> {
+  const [ownership, memberships] = await Promise.all([
+    supabaseAdmin
+      .from("platform_user_tenants")
+      .select("tenant_id")
+      .eq("user_id", userId),
+    supabaseAdmin
+      .from("workspace_members")
+      .select("workspace_id, role, is_active")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+  ]);
+
+  if (ownership.error) {
+    throwPlatformSchemaMissingError(`Failed to load workspace owner roles: ${ownership.error.message}`);
+  }
+  if (memberships.error) {
+    throwPlatformSchemaMissingError(`Failed to load workspace member roles: ${memberships.error.message}`);
+  }
+
+  const roleMap = new Map<string, WorkspaceRole>();
+
+  for (const row of (memberships.data ?? []) as Array<{ workspace_id: string; role: string | null }>) {
+    const workspaceId = row.workspace_id?.trim();
+    if (!workspaceId) {
+      continue;
+    }
+    const role = row.role?.trim().toLowerCase();
+    if (role === "owner" || role === "admin" || role === "supervisor" || role === "agent" || role === "viewer") {
+      roleMap.set(workspaceId, role);
+    } else {
+      roleMap.set(workspaceId, "agent");
+    }
+  }
+
+  for (const row of (ownership.data ?? []) as Array<{ tenant_id: string | null }>) {
+    const workspaceId = row.tenant_id?.trim();
+    if (workspaceId) {
+      roleMap.set(workspaceId, "owner");
+    }
+  }
+
+  return roleMap;
+}
+
+export async function countActiveWorkspaceSeats(workspaceId: string): Promise<number> {
+  const { count, error } = await supabaseAdmin
+    .from("workspace_members")
+    .select("id", { head: true, count: "exact" })
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .not("role", "eq", "viewer");
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to count workspace seats: ${error.message}`);
+  }
+
+  return count ?? 0;
+}
+
+export async function getWorkspaceSeatLimit(workspaceId: string): Promise<number> {
+  const ownerUserId = await getPrimaryPlatformUserIdForTenant(workspaceId);
+  if (!ownerUserId) {
+    return 3;
+  }
+
+  const subscription = await getSubscriptionByUserId(ownerUserId);
+  if (!subscription) {
+    return 3;
+  }
+
+  const maxSeats = Number(subscription.max_seats);
+  if (!Number.isFinite(maxSeats) || maxSeats <= 0) {
+    return 3;
+  }
+
+  return Math.floor(maxSeats);
+}
+
+export async function createWorkspaceInvitation(input: {
+  workspace_id: string;
+  email: string;
+  role: WorkspaceRole;
+  token_hash: string;
+  invited_by?: string | null;
+  expires_at: string;
+}): Promise<WorkspaceInvitationRecord> {
+  const { data, error } = await supabaseAdmin
+    .from("workspace_invitations")
+    .insert({
+      workspace_id: input.workspace_id,
+      email: input.email.trim().toLowerCase(),
+      role: input.role,
+      token_hash: input.token_hash,
+      invited_by: input.invited_by ?? null,
+      expires_at: input.expires_at
+    })
+    .select("*")
+    .single();
+
+  if (error || !data) {
+    throwPlatformSchemaMissingError(`Failed to create workspace invitation: ${error?.message ?? "Unknown error"}`);
+  }
+
+  return data as WorkspaceInvitationRecord;
+}
+
+export async function listWorkspaceInvitations(
+  workspaceId: string
+): Promise<WorkspaceInvitationRecord[]> {
+  const { data, error } = await supabaseAdmin
+    .from("workspace_invitations")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to list workspace invitations: ${error.message}`);
+  }
+
+  return (data ?? []) as WorkspaceInvitationRecord[];
+}
+
+export async function getWorkspaceInvitationByTokenHash(
+  tokenHash: string
+): Promise<WorkspaceInvitationRecord | null> {
+  const { data, error } = await supabaseAdmin
+    .from("workspace_invitations")
+    .select("*")
+    .eq("token_hash", tokenHash)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load workspace invitation: ${error.message}`);
+  }
+
+  return (data as WorkspaceInvitationRecord | null) ?? null;
+}
+
+export async function markWorkspaceInvitationAccepted(invitationId: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("workspace_invitations")
+    .update({
+      accepted_at: new Date().toISOString()
+    })
+    .eq("id", invitationId)
+    .is("accepted_at", null);
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to mark workspace invitation accepted: ${error.message}`);
+  }
+}
+
+export async function insertAuditLog(input: {
+  workspace_id: string;
+  actor_user_id?: string | null;
+  action: string;
+  target_type: string;
+  target_id?: string | null;
+  ip_address?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("audit_logs")
+    .insert({
+      workspace_id: input.workspace_id,
+      actor_user_id: input.actor_user_id ?? null,
+      action: input.action,
+      target_type: input.target_type,
+      target_id: input.target_id ?? null,
+      ip_address: input.ip_address ?? null,
+      metadata: input.metadata ?? {}
+    });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to insert audit log: ${error.message}`);
   }
 }
 
@@ -1358,7 +1692,7 @@ export async function updateTenantBusinessProfile(
   const { data: existing, error: existingError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "name, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
+      "name, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips, csat_enabled, csat_prompt"
     )
     .eq("tenant_id", tenantId)
     .maybeSingle();
@@ -1402,6 +1736,8 @@ export async function updateTenantBusinessProfile(
     notif_text: string | null;
     notif_animation: string | null;
     notif_chips: string[] | null;
+    csat_enabled: boolean | null;
+    csat_prompt: string | null;
   };
 
   const next = normalizeBusinessProfile(
@@ -1437,7 +1773,9 @@ export async function updateTenantBusinessProfile(
       notif_enabled: patch.notif_enabled ?? current.notif_enabled ?? undefined,
       notif_text: patch.notif_text ?? current.notif_text ?? undefined,
       notif_animation: (patch.notif_animation ?? current.notif_animation ?? undefined) as NotifAnimation | undefined,
-      notif_chips: patch.notif_chips ?? current.notif_chips ?? undefined
+      notif_chips: patch.notif_chips ?? current.notif_chips ?? undefined,
+      csat_enabled: patch.csat_enabled ?? current.csat_enabled ?? undefined,
+      csat_prompt: patch.csat_prompt ?? current.csat_prompt ?? undefined
     },
     { companyName: current.name }
   );
@@ -1473,7 +1811,9 @@ export async function updateTenantBusinessProfile(
       notif_enabled: next.notif_enabled,
       notif_text: next.notif_text,
       notif_animation: next.notif_animation,
-      notif_chips: next.notif_chips
+      notif_chips: next.notif_chips,
+      csat_enabled: next.csat_enabled,
+      csat_prompt: next.csat_prompt
     })
     .eq("tenant_id", tenantId);
 
@@ -1579,24 +1919,17 @@ export async function updatePlatformUser(
 }
 
 export async function listUserTenants(userId: string): Promise<TenantSummary[]> {
-  const { data: links, error: linksError } = await supabaseAdmin
-    .from("platform_user_tenants")
-    .select("tenant_id")
-    .eq("user_id", userId);
-
-  if (linksError) {
-    throwPlatformSchemaMissingError(`Failed to load user tenants: ${linksError.message}`);
-  }
-
-  const tenantIds = (links ?? []).map((item) => (item as { tenant_id: string }).tenant_id);
+  const tenantIds = await listUserTenantIds(userId);
   if (tenantIds.length === 0) {
     return [];
   }
 
+  const roleMap = await listWorkspaceRolesForUser(userId);
+
   const { data: tenants, error: tenantsError } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, knowledge_status, knowledge_message, knowledge_last_ingested_at, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips, csat_enabled, csat_prompt, conversation_retention_days, retention_purge_grace_days, allow_conversation_export"
     )
     .in("tenant_id", tenantIds);
 
@@ -1654,10 +1987,16 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     notif_text: string | null;
     notif_animation: string | null;
     notif_chips: string[] | null;
+    csat_enabled: boolean | null;
+    csat_prompt: string | null;
+    conversation_retention_days: number | null;
+    retention_purge_grace_days: number | null;
+    allow_conversation_export: boolean | null;
   }>).map((tenant) => ({
     tenant_id: tenant.tenant_id,
     name: tenant.name,
     allowed_domains: tenant.allowed_domains,
+    workspace_role: roleMap.get(tenant.tenant_id) ?? null,
     business_profile: normalizeBusinessProfile(
       {
         business_type: tenant.business_type || undefined,
@@ -1688,7 +2027,9 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
         notif_enabled: tenant.notif_enabled ?? undefined,
         notif_text: tenant.notif_text || undefined,
         notif_animation: tenant.notif_animation as NotifAnimation | undefined,
-        notif_chips: tenant.notif_chips || undefined
+        notif_chips: tenant.notif_chips || undefined,
+        csat_enabled: tenant.csat_enabled ?? undefined,
+        csat_prompt: tenant.csat_prompt || undefined
       },
       { companyName: tenant.name }
     ),
@@ -1697,8 +2038,195 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
       message: tenant.knowledge_message,
       last_ingested_at: tenant.knowledge_last_ingested_at
     }),
+    retention: {
+      conversation_retention_days: Number.isFinite(tenant.conversation_retention_days)
+        ? Math.max(30, tenant.conversation_retention_days ?? 365)
+        : 365,
+      retention_purge_grace_days: Number.isFinite(tenant.retention_purge_grace_days)
+        ? Math.max(0, tenant.retention_purge_grace_days ?? 30)
+        : 30,
+      allow_conversation_export: tenant.allow_conversation_export ?? true
+    },
     domain_verification: mapDomainVerification(verificationByTenant.get(tenant.tenant_id) ?? null)
   }));
+}
+
+export async function getTenantRetentionSettings(
+  tenantId: string
+): Promise<TenantRetentionSettings> {
+  const { data, error } = await supabaseAdmin
+    .from("tenants")
+    .select("conversation_retention_days, retention_purge_grace_days, allow_conversation_export")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load tenant retention settings: ${error.message}`);
+  }
+
+  if (!data) {
+    throw new HttpError(404, "Tenant not found");
+  }
+
+  const row = data as {
+    conversation_retention_days: number | null;
+    retention_purge_grace_days: number | null;
+    allow_conversation_export: boolean | null;
+  };
+
+  return {
+    conversation_retention_days: row.conversation_retention_days ?? 365,
+    retention_purge_grace_days: row.retention_purge_grace_days ?? 30,
+    allow_conversation_export: row.allow_conversation_export ?? true
+  };
+}
+
+export async function updateTenantRetentionSettings(input: {
+  tenant_id: string;
+  conversation_retention_days?: number;
+  retention_purge_grace_days?: number;
+  allow_conversation_export?: boolean;
+}): Promise<TenantRetentionSettings> {
+  const payload: Record<string, unknown> = {};
+  if (typeof input.conversation_retention_days === "number") {
+    payload.conversation_retention_days = input.conversation_retention_days;
+  }
+  if (typeof input.retention_purge_grace_days === "number") {
+    payload.retention_purge_grace_days = input.retention_purge_grace_days;
+  }
+  if (typeof input.allow_conversation_export === "boolean") {
+    payload.allow_conversation_export = input.allow_conversation_export;
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return getTenantRetentionSettings(input.tenant_id);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("tenants")
+    .update(payload)
+    .eq("tenant_id", input.tenant_id)
+    .select("conversation_retention_days, retention_purge_grace_days, allow_conversation_export")
+    .maybeSingle();
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to update tenant retention settings: ${error.message}`);
+  }
+  if (!data) {
+    throw new HttpError(404, "Tenant not found");
+  }
+
+  const row = data as {
+    conversation_retention_days: number | null;
+    retention_purge_grace_days: number | null;
+    allow_conversation_export: boolean | null;
+  };
+  return {
+    conversation_retention_days: row.conversation_retention_days ?? 365,
+    retention_purge_grace_days: row.retention_purge_grace_days ?? 30,
+    allow_conversation_export: row.allow_conversation_export ?? true
+  };
+}
+
+export async function listAllTenantRetentionSettings(): Promise<
+  Array<{
+    tenant_id: string;
+    settings: TenantRetentionSettings;
+  }>
+> {
+  const { data, error } = await supabaseAdmin
+    .from("tenants")
+    .select("tenant_id, conversation_retention_days, retention_purge_grace_days, allow_conversation_export");
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to list tenant retention settings: ${error.message}`);
+  }
+
+  return ((data ?? []) as Array<{
+    tenant_id: string;
+    conversation_retention_days: number | null;
+    retention_purge_grace_days: number | null;
+    allow_conversation_export: boolean | null;
+  }>).map((row) => ({
+    tenant_id: row.tenant_id,
+    settings: {
+      conversation_retention_days: row.conversation_retention_days ?? 365,
+      retention_purge_grace_days: row.retention_purge_grace_days ?? 30,
+      allow_conversation_export: row.allow_conversation_export ?? true
+    }
+  }));
+}
+
+export async function listConversationsForExport(input: {
+  tenant_id: string;
+  start_at?: string;
+  end_at?: string;
+  limit: number;
+  offset: number;
+}): Promise<{ conversations: ConversationExportChatRow[]; total: number }> {
+  let query = supabaseAdmin
+    .from("chats")
+    .select(
+      "id, tenant_id, workspace_id, queue_id, device_id, title, summary, conversation_mode, conversation_status, assigned_agent_id, handoff_requested_at, assigned_at, closed_at, sla_breached, visitor_is_vip, routing_skill, created_at, updated_at, last_message_at",
+      { count: "exact" }
+    )
+    .eq("tenant_id", input.tenant_id)
+    .order("created_at", { ascending: false });
+
+  if (input.start_at) {
+    query = query.gte("created_at", input.start_at);
+  }
+  if (input.end_at) {
+    query = query.lte("created_at", input.end_at);
+  }
+
+  const { data, error, count } = await query.range(input.offset, input.offset + input.limit - 1);
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to list conversations for export: ${error.message}`);
+  }
+
+  return {
+    conversations: (data ?? []) as ConversationExportChatRow[],
+    total: count ?? 0
+  };
+}
+
+export async function listMessagesForChats(chatIds: string[]): Promise<ConversationExportMessageRow[]> {
+  if (chatIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("id, chat_id, role, content, metadata, sender_type, sender_id, is_internal, is_draft, dedupe_key, created_at")
+    .in("chat_id", chatIds)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to list messages for export: ${error.message}`);
+  }
+
+  return (data ?? []) as ConversationExportMessageRow[];
+}
+
+export async function listConversationEventsForChats(
+  chatIds: string[]
+): Promise<ConversationExportEventRow[]> {
+  if (chatIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("conversation_events")
+    .select("id, chat_id, event_type, actor_id, actor_type, old_mode, new_mode, metadata, created_at")
+    .in("chat_id", chatIds)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to list conversation events for export: ${error.message}`);
+  }
+
+  return (data ?? []) as ConversationExportEventRow[];
 }
 
 // ============================================================================
@@ -1712,6 +2240,7 @@ type SubscriptionRow = {
   status: string;
   max_tenants: number;
   max_messages_mo: number;
+  max_seats: number;
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   stripe_price_id: string | null;
@@ -1733,6 +2262,7 @@ export type SubscriptionSummary = {
   status: SubscriptionStatus;
   max_tenants: number;
   max_messages_mo: number;
+  max_seats: number;
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   stripe_price_id: string | null;
@@ -1744,11 +2274,11 @@ export type SubscriptionSummary = {
   created_at: string;
 };
 
-const PLAN_LIMITS: Record<SubscriptionPlan, { max_tenants: number; max_messages_mo: number }> = {
-  trial: { max_tenants: 5, max_messages_mo: 100 },
-  starter: { max_tenants: 1, max_messages_mo: 10_000 },
-  growth: { max_tenants: 5, max_messages_mo: 100_000 },
-  enterprise: { max_tenants: 999, max_messages_mo: 1_000_000 }
+const PLAN_LIMITS: Record<SubscriptionPlan, { max_tenants: number; max_messages_mo: number; max_seats: number }> = {
+  trial: { max_tenants: 5, max_messages_mo: 100, max_seats: 3 },
+  starter: { max_tenants: 1, max_messages_mo: 10_000, max_seats: 5 },
+  growth: { max_tenants: 5, max_messages_mo: 100_000, max_seats: 25 },
+  enterprise: { max_tenants: 999, max_messages_mo: 1_000_000, max_seats: 500 }
 };
 
 function normalizeSubscriptionPlan(input: string | null | undefined): SubscriptionPlan {
@@ -1786,6 +2316,7 @@ function toSubscriptionSummary(row: SubscriptionRow): SubscriptionSummary {
     status,
     max_tenants: row.max_tenants,
     max_messages_mo: row.max_messages_mo,
+    max_seats: row.max_seats,
     stripe_customer_id: row.stripe_customer_id,
     stripe_subscription_id: row.stripe_subscription_id,
     stripe_price_id: row.stripe_price_id,
@@ -1811,6 +2342,7 @@ export async function createTrialSubscription(userId: string): Promise<Subscript
         status: "active",
         max_tenants: limits.max_tenants,
         max_messages_mo: limits.max_messages_mo,
+        max_seats: limits.max_seats,
         stripe_customer_id: null,
         stripe_subscription_id: null,
         stripe_price_id: null,
@@ -1858,6 +2390,9 @@ export async function getSubscriptionByUserId(userId: string): Promise<Subscript
     }
     if (row.max_messages_mo !== limits.max_messages_mo) {
       payload.max_messages_mo = limits.max_messages_mo;
+    }
+    if (row.max_seats !== limits.max_seats) {
+      payload.max_seats = limits.max_seats;
     }
   }
 
@@ -1947,6 +2482,7 @@ export async function syncSubscriptionFromStripe(input: {
     status: mapStripeStatusToLocal(input.stripe_status),
     max_tenants: limits.max_tenants,
     max_messages_mo: limits.max_messages_mo,
+    max_seats: limits.max_seats,
     stripe_customer_id: input.stripe_customer_id,
     stripe_subscription_id: input.stripe_subscription_id,
     stripe_price_id: input.stripe_price_id,
@@ -2037,6 +2573,7 @@ export async function updateSubscriptionPlan(
         status: "active",
         max_tenants: limits.max_tenants,
         max_messages_mo: limits.max_messages_mo,
+        max_seats: limits.max_seats,
         stripe_price_id: null,
         stripe_subscription_id: null,
         trial_ends_at: null,
@@ -2062,6 +2599,7 @@ export async function updateSubscriptionPlan(
       status: "active",
       max_tenants: limits.max_tenants,
       max_messages_mo: limits.max_messages_mo,
+      max_seats: limits.max_seats,
       stripe_customer_id: null,
       stripe_subscription_id: null,
       stripe_price_id: null,
@@ -2141,6 +2679,32 @@ export type PlatformAnalyticsMessageRow = {
 
 export type PlatformAnalyticsUsageRow = PlatformUsageEventRow;
 
+export type PlatformAnalyticsConversationRow = {
+  id: string;
+  tenant_id: string;
+  assigned_agent_id: string | null;
+  handoff_requested_at: string | null;
+  first_agent_response_at: string | null;
+  assigned_at: string | null;
+  closed_at: string | null;
+  sla_breached: boolean;
+  visitor_is_vip: boolean;
+  created_at: string;
+};
+
+export type PlatformAnalyticsCsatRow = {
+  chat_id: string;
+  tenant_id: string;
+  rating: number;
+  submitted_at: string;
+};
+
+export type PlatformAgentCapacitySnapshotRow = {
+  tenant_id: string;
+  user_id: string;
+  max_concurrent_chats: number;
+};
+
 export type TenantSubscriptionUsageSnapshot = {
   user_id: string;
   subscription: SubscriptionSummary;
@@ -2160,6 +2724,54 @@ export type PlatformVisitorContactRow = {
   captured_at: string;
   created_at: string;
   updated_at: string;
+};
+
+export type ConversationExportChatRow = {
+  id: string;
+  tenant_id: string;
+  workspace_id: string | null;
+  queue_id: string | null;
+  device_id: string;
+  title: string;
+  summary: string | null;
+  conversation_mode: string;
+  conversation_status: string;
+  assigned_agent_id: string | null;
+  handoff_requested_at: string | null;
+  assigned_at: string | null;
+  closed_at: string | null;
+  sla_breached: boolean;
+  visitor_is_vip: boolean;
+  routing_skill: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+};
+
+export type ConversationExportMessageRow = {
+  id: string;
+  chat_id: string;
+  role: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  sender_type: string;
+  sender_id: string | null;
+  is_internal: boolean;
+  is_draft: boolean;
+  dedupe_key: string | null;
+  created_at: string;
+};
+
+export type ConversationExportEventRow = {
+  id: string;
+  chat_id: string;
+  event_type: string;
+  actor_id: string | null;
+  actor_type: string | null;
+  old_mode: string | null;
+  new_mode: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
 };
 
 function normalizeJoinedChat(
@@ -2246,19 +2858,44 @@ export async function listTenantVisitorContacts(input: {
 }
 
 export async function listUserTenantIds(userId: string): Promise<string[]> {
-  const { data, error } = await supabaseAdmin
-    .from("platform_user_tenants")
-    .select("tenant_id")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
+  const [ownership, membership] = await Promise.all([
+    supabaseAdmin
+      .from("platform_user_tenants")
+      .select("tenant_id")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: true }),
+    supabaseAdmin
+      .from("workspace_members")
+      .select("workspace_id")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+  ]);
 
-  if (error) {
-    throwPlatformSchemaMissingError(`Failed to load user tenant ids: ${error.message}`);
+  if (ownership.error) {
+    throwPlatformSchemaMissingError(`Failed to load user tenant ids: ${ownership.error.message}`);
+  }
+  if (membership.error) {
+    throwPlatformSchemaMissingError(`Failed to load user workspace memberships: ${membership.error.message}`);
   }
 
-  return ((data ?? []) as Array<{ tenant_id: string | null }>)
-    .map((row) => row.tenant_id?.trim() ?? "")
-    .filter(Boolean);
+  const ids = new Set<string>();
+
+  for (const row of (ownership.data ?? []) as Array<{ tenant_id: string | null }>) {
+    const id = row.tenant_id?.trim() ?? "";
+    if (id) {
+      ids.add(id);
+    }
+  }
+
+  for (const row of (membership.data ?? []) as Array<{ workspace_id: string | null }>) {
+    const id = row.workspace_id?.trim() ?? "";
+    if (id) {
+      ids.add(id);
+    }
+  }
+
+  return Array.from(ids);
 }
 
 export async function getPrimaryPlatformUserIdForTenant(tenantId: string): Promise<string | null> {
@@ -2429,6 +3066,172 @@ export async function listPlatformUsageEvents(input: {
   }
 
   return rows;
+}
+
+export async function listPlatformAnalyticsConversations(input: {
+  tenant_ids: string[];
+  start_at: string;
+  end_at: string;
+}): Promise<PlatformAnalyticsConversationRow[]> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const rows: PlatformAnalyticsConversationRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("chats")
+      .select(
+        "id, tenant_id, assigned_agent_id, handoff_requested_at, first_agent_response_at, assigned_at, closed_at, sla_breached, visitor_is_vip, created_at"
+      )
+      .in("tenant_id", input.tenant_ids)
+      .gte("created_at", input.start_at)
+      .lte("created_at", input.end_at)
+      .order("created_at", { ascending: true })
+      .range(from, from + ANALYTICS_PAGE_SIZE - 1);
+
+    if (error) {
+      throwPlatformSchemaMissingError(`Failed to load analytics conversations: ${error.message}`);
+    }
+
+    const page = (data ?? []) as PlatformAnalyticsConversationRow[];
+    rows.push(...page);
+
+    if (page.length < ANALYTICS_PAGE_SIZE) {
+      break;
+    }
+
+    from += ANALYTICS_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+export async function listPlatformAnalyticsCsat(input: {
+  tenant_ids: string[];
+  start_at: string;
+  end_at: string;
+}): Promise<PlatformAnalyticsCsatRow[]> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const rows: PlatformAnalyticsCsatRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("conversation_csat")
+      .select("chat_id, tenant_id, rating, submitted_at")
+      .in("tenant_id", input.tenant_ids)
+      .gte("submitted_at", input.start_at)
+      .lte("submitted_at", input.end_at)
+      .order("submitted_at", { ascending: true })
+      .range(from, from + ANALYTICS_PAGE_SIZE - 1);
+
+    if (error) {
+      throwPlatformSchemaMissingError(`Failed to load analytics CSAT rows: ${error.message}`);
+    }
+
+    const page = (data ?? []) as PlatformAnalyticsCsatRow[];
+    rows.push(...page);
+
+    if (page.length < ANALYTICS_PAGE_SIZE) {
+      break;
+    }
+
+    from += ANALYTICS_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+export async function listPlatformAgentCapacitySnapshots(input: {
+  tenant_ids: string[];
+}): Promise<PlatformAgentCapacitySnapshotRow[]> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const { data: membersData, error: membersError } = await supabaseAdmin
+    .from("workspace_members")
+    .select("id, workspace_id, user_id")
+    .in("workspace_id", input.tenant_ids)
+    .eq("is_active", true);
+
+  if (membersError) {
+    throwPlatformSchemaMissingError(`Failed to load workspace members for utilization: ${membersError.message}`);
+  }
+
+  const members = (membersData ?? []) as Array<{
+    id: string;
+    workspace_id: string;
+    user_id: string;
+  }>;
+  if (members.length === 0) {
+    return [];
+  }
+
+  const memberById = new Map(members.map((member) => [member.id, member] as const));
+  const memberIds = members.map((member) => member.id);
+
+  const { data: queueMemberData, error: queueMemberError } = await supabaseAdmin
+    .from("queue_members")
+    .select("workspace_member_id, max_concurrent_chats")
+    .in("workspace_member_id", memberIds)
+    .eq("is_active", true);
+
+  if (queueMemberError) {
+    throwPlatformSchemaMissingError(`Failed to load queue members for utilization: ${queueMemberError.message}`);
+  }
+
+  return ((queueMemberData ?? []) as Array<{
+    workspace_member_id: string;
+    max_concurrent_chats: number;
+  }>).flatMap((row) => {
+    const member = memberById.get(row.workspace_member_id);
+    if (!member) {
+      return [];
+    }
+    return [
+      {
+        tenant_id: member.workspace_id,
+        user_id: member.user_id,
+        max_concurrent_chats: row.max_concurrent_chats
+      }
+    ];
+  });
+}
+
+export async function listPlatformActiveAssignedChats(input: {
+  tenant_ids: string[];
+}): Promise<Array<{ tenant_id: string; assigned_agent_id: string }>> {
+  if (input.tenant_ids.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("chats")
+    .select("tenant_id, assigned_agent_id")
+    .in("tenant_id", input.tenant_ids)
+    .in("conversation_mode", ["agent_active", "copilot"])
+    .not("assigned_agent_id", "is", null);
+
+  if (error) {
+    throwPlatformSchemaMissingError(`Failed to load active assigned chats: ${error.message}`);
+  }
+
+  return ((data ?? []) as Array<{
+    tenant_id: string;
+    assigned_agent_id: string | null;
+  }>)
+    .filter((row) => Boolean(row.assigned_agent_id))
+    .map((row) => ({
+      tenant_id: row.tenant_id,
+      assigned_agent_id: row.assigned_agent_id as string
+    }));
 }
 
 export async function getPlatformUsageTrackingStartedAt(

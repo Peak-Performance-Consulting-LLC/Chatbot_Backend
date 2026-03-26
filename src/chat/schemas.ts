@@ -22,6 +22,7 @@ export const chatStreamInputSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   device_id: z.string().trim().min(2).max(120),
   chat_id: z.string().uuid().optional(),
+  client_message_id: z.string().trim().min(8).max(120).optional(),
   message: z.string().trim().min(1).max(4000),
   page_context: z
     .object({

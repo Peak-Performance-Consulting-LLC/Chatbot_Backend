@@ -60,7 +60,9 @@ export async function PATCH(request: Request) {
       notif_enabled: parsed.data.notif_enabled,
       notif_text: parsed.data.notif_text,
       notif_animation: parsed.data.notif_animation,
-      notif_chips: parsed.data.notif_chips
+      notif_chips: parsed.data.notif_chips,
+      csat_enabled: parsed.data.csat_enabled,
+      csat_prompt: parsed.data.csat_prompt
     });
 
     // Immediately evict in-process cache so widget-config returns fresh values

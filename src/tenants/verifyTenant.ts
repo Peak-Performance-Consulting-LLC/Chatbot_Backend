@@ -36,6 +36,8 @@ type TenantRow = {
   notif_text: string;
   notif_animation: "bounce" | "pulse" | "slide";
   notif_chips: string[];
+  csat_enabled: boolean;
+  csat_prompt: string;
 };
 
 const TENANT_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -161,7 +163,7 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
   const { data, error } = await supabaseAdmin
     .from("tenants")
     .select(
-      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips"
+      "tenant_id, name, allowed_domains, business_type, supported_services, support_phone, support_email, support_cta_label, header_cta_label, header_cta_notice, business_description, primary_color, user_bubble_color, bot_bubble_color, font_family, widget_position, launcher_style, theme_style, bg_pattern, launcher_icon, window_width, window_height, border_radius, welcome_message, bot_name, bot_avatar_url, quick_replies, ai_tone, notif_enabled, notif_text, notif_animation, notif_chips, csat_enabled, csat_prompt"
     )
     .eq("tenant_id", tenantId)
     .single();
@@ -173,7 +175,9 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
       error.message.includes("column tenants.primary_color does not exist") ||
       error.message.includes("column tenants.welcome_message does not exist") ||
       error.message.includes("column tenants.theme_style does not exist") ||
-      error.message.includes("column tenants.quick_replies does not exist");
+      error.message.includes("column tenants.quick_replies does not exist") ||
+      error.message.includes("column tenants.csat_enabled does not exist") ||
+      error.message.includes("column tenants.csat_prompt does not exist");
 
     if (missingColumns) {
       throw new HttpError(
@@ -222,6 +226,8 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     notif_text?: string | null;
     notif_animation?: "bounce" | "pulse" | "slide" | null;
     notif_chips?: string[] | null;
+    csat_enabled?: boolean | null;
+    csat_prompt?: string | null;
   };
 
   const result: TenantRow = {
@@ -274,7 +280,9 @@ export async function getTenantById(tenantId: string): Promise<TenantRow> {
     notif_enabled: row.notif_enabled ?? true,
     notif_text: row.notif_text?.trim() || "👋 Need help?",
     notif_animation: row.notif_animation === "pulse" || row.notif_animation === "slide" ? row.notif_animation : "bounce",
-    notif_chips: normalizeStringList(row.notif_chips, defaultNotifChips, 4, 40)
+    notif_chips: normalizeStringList(row.notif_chips, defaultNotifChips, 4, 40),
+    csat_enabled: row.csat_enabled ?? true,
+    csat_prompt: row.csat_prompt?.trim() || "How was your support experience?"
   } as TenantRow;
 
   pruneTenantCache();

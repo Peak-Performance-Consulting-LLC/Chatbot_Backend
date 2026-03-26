@@ -125,6 +125,101 @@ create table if not exists public.messages (
 create index if not exists messages_chat_created_idx
   on public.messages (chat_id, created_at asc);
 
+-- ============================================================================
+-- PHASE 1: CONVERSATION MODEL FOUNDATION
+-- ============================================================================
+
+do $$ begin
+  create type conversation_mode as enum (
+    'ai_only',
+    'handoff_pending',
+    'agent_active',
+    'copilot',
+    'returned_to_ai',
+    'closed'
+  );
+exception when duplicate_object then null;
+end $$;
+
+do $$ begin
+  create type conversation_status as enum (
+    'active',
+    'waiting',
+    'assigned',
+    'closed',
+    'archived'
+  );
+exception when duplicate_object then null;
+end $$;
+
+do $$ begin
+  create type sender_type as enum (
+    'visitor',
+    'ai',
+    'agent',
+    'system'
+  );
+exception when duplicate_object then null;
+end $$;
+
+alter table public.chats
+  add column if not exists conversation_mode conversation_mode not null default 'ai_only',
+  add column if not exists conversation_status conversation_status not null default 'active',
+  add column if not exists assigned_agent_id uuid default null,
+  add column if not exists handoff_requested_at timestamptz default null,
+  add column if not exists assigned_at timestamptz default null,
+  add column if not exists closed_at timestamptz default null,
+  add column if not exists priority integer not null default 0,
+  add column if not exists sla_breached boolean not null default false;
+
+alter table public.chats
+  drop constraint if exists chats_assigned_agent_required_check;
+
+alter table public.chats
+  add constraint chats_assigned_agent_required_check
+    check (
+      (
+        conversation_mode in ('agent_active', 'copilot')
+        and assigned_agent_id is not null
+      )
+      or conversation_mode not in ('agent_active', 'copilot')
+    );
+
+create index if not exists idx_chats_assigned_agent
+  on public.chats (assigned_agent_id)
+  where assigned_agent_id is not null;
+
+create index if not exists idx_chats_handoff_pending
+  on public.chats (last_message_at desc)
+  where conversation_mode = 'handoff_pending';
+
+create index if not exists idx_chats_mode_status
+  on public.chats (conversation_mode, conversation_status, last_message_at desc);
+
+alter table public.messages
+  add column if not exists sender_type sender_type not null default 'visitor',
+  add column if not exists sender_id uuid default null,
+  add column if not exists is_internal boolean not null default false;
+
+create index if not exists idx_messages_is_internal
+  on public.messages (chat_id, is_internal)
+  where is_internal = true;
+
+create table if not exists public.conversation_events (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  event_type text not null,
+  actor_id uuid default null,
+  actor_type text default null,
+  old_mode conversation_mode default null,
+  new_mode conversation_mode default null,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_conversation_events_chat
+  on public.conversation_events (chat_id, created_at desc);
+
 -- Dedicated flight state per chat (slot-filling state machine)
 create table if not exists public.flight_search_sessions (
   chat_id uuid primary key references public.chats(id) on delete cascade,
@@ -459,3 +554,356 @@ create index if not exists platform_usage_events_created_idx
 
 create index if not exists platform_usage_events_chat_created_idx
   on public.platform_usage_events (chat_id, created_at desc);
+
+-- ============================================================================
+-- PHASE 2: TEAM MEMBERSHIP, QUEUES, PRESENCE
+-- ============================================================================
+
+do $$ begin
+  create type workspace_member_role as enum (
+    'owner',
+    'admin',
+    'supervisor',
+    'agent',
+    'viewer'
+  );
+exception when duplicate_object then null;
+end $$;
+
+do $$ begin
+  create type queue_routing_mode as enum (
+    'manual_accept',
+    'auto_assign'
+  );
+exception when duplicate_object then null;
+end $$;
+
+do $$ begin
+  create type agent_presence_status as enum (
+    'online',
+    'away',
+    'offline'
+  );
+exception when duplicate_object then null;
+end $$;
+
+create table if not exists public.workspace_members (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id text not null references public.tenants(tenant_id) on delete cascade,
+  user_id uuid not null references public.platform_users(id) on delete cascade,
+  role workspace_member_role not null default 'agent',
+  is_active boolean not null default true,
+  created_by uuid references public.platform_users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (workspace_id, user_id)
+);
+
+create index if not exists idx_workspace_members_workspace
+  on public.workspace_members (workspace_id, role, created_at desc);
+
+create index if not exists idx_workspace_members_user
+  on public.workspace_members (user_id, is_active);
+
+drop trigger if exists workspace_members_set_updated_at on public.workspace_members;
+create trigger workspace_members_set_updated_at
+before update on public.workspace_members
+for each row
+execute procedure public.set_updated_at();
+
+create table if not exists public.queues (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id text not null references public.tenants(tenant_id) on delete cascade,
+  tenant_id text not null references public.tenants(tenant_id) on delete cascade,
+  name text not null,
+  routing_mode queue_routing_mode not null default 'manual_accept',
+  is_active boolean not null default true,
+  business_hours jsonb not null default '{}'::jsonb,
+  overflow_queue_id uuid references public.queues(id) on delete set null,
+  created_by uuid references public.platform_users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (tenant_id, name)
+);
+
+create index if not exists idx_queues_workspace_active
+  on public.queues (workspace_id, is_active, created_at desc);
+
+create index if not exists idx_queues_tenant
+  on public.queues (tenant_id, created_at desc);
+
+drop trigger if exists queues_set_updated_at on public.queues;
+create trigger queues_set_updated_at
+before update on public.queues
+for each row
+execute procedure public.set_updated_at();
+
+create table if not exists public.queue_members (
+  id uuid primary key default gen_random_uuid(),
+  queue_id uuid not null references public.queues(id) on delete cascade,
+  workspace_member_id uuid not null references public.workspace_members(id) on delete cascade,
+  priority integer not null default 100,
+  max_concurrent_chats integer not null default 4,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (queue_id, workspace_member_id)
+);
+
+create index if not exists idx_queue_members_queue_priority
+  on public.queue_members (queue_id, is_active, priority asc);
+
+create index if not exists idx_queue_members_member
+  on public.queue_members (workspace_member_id, is_active);
+
+drop trigger if exists queue_members_set_updated_at on public.queue_members;
+create trigger queue_members_set_updated_at
+before update on public.queue_members
+for each row
+execute procedure public.set_updated_at();
+
+create table if not exists public.agent_presence (
+  workspace_member_id uuid primary key references public.workspace_members(id) on delete cascade,
+  status agent_presence_status not null default 'offline',
+  last_heartbeat_at timestamptz,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_agent_presence_status
+  on public.agent_presence (status, updated_at desc);
+
+drop trigger if exists agent_presence_set_updated_at on public.agent_presence;
+create trigger agent_presence_set_updated_at
+before update on public.agent_presence
+for each row
+execute procedure public.set_updated_at();
+
+alter table public.chats
+  add column if not exists workspace_id text references public.tenants(tenant_id) on delete set null,
+  add column if not exists queue_id uuid references public.queues(id) on delete set null;
+
+update public.chats
+set workspace_id = tenant_id
+where workspace_id is null;
+
+create index if not exists idx_chats_workspace_mode
+  on public.chats (workspace_id, conversation_mode, last_message_at desc);
+
+create index if not exists idx_chats_queue_mode
+  on public.chats (queue_id, conversation_mode, last_message_at desc);
+
+insert into public.workspace_members (workspace_id, user_id, role, is_active)
+select put.tenant_id, put.user_id, 'owner'::workspace_member_role, true
+from public.platform_user_tenants put
+left join public.workspace_members wm
+  on wm.workspace_id = put.tenant_id
+ and wm.user_id = put.user_id
+where wm.id is null;
+
+-- ============================================================================
+-- PHASE 3: INVITATIONS, AUDIT, SEAT LIMITS
+-- ============================================================================
+
+alter table public.platform_subscriptions
+  add column if not exists max_seats integer not null default 3;
+
+update public.platform_subscriptions
+set max_seats = case
+  when plan = 'trial' then 3
+  when plan = 'starter' then 5
+  when plan = 'growth' then 25
+  when plan = 'enterprise' then 500
+  else max_seats
+end
+where max_seats is null
+   or max_seats <= 0;
+
+create table if not exists public.workspace_invitations (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id text not null references public.tenants(tenant_id) on delete cascade,
+  email text not null,
+  role workspace_member_role not null default 'agent',
+  token_hash text not null unique,
+  invited_by uuid references public.platform_users(id) on delete set null,
+  expires_at timestamptz not null,
+  accepted_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_workspace_invitations_workspace
+  on public.workspace_invitations (workspace_id, created_at desc);
+
+create index if not exists idx_workspace_invitations_email
+  on public.workspace_invitations (lower(email), expires_at desc);
+
+create table if not exists public.audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id text not null references public.tenants(tenant_id) on delete cascade,
+  actor_user_id uuid references public.platform_users(id) on delete set null,
+  action text not null,
+  target_type text not null,
+  target_id text,
+  ip_address text,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_audit_logs_workspace
+  on public.audit_logs (workspace_id, created_at desc);
+
+create index if not exists idx_audit_logs_actor
+  on public.audit_logs (actor_user_id, created_at desc);
+
+-- ============================================================================
+-- PHASE 4: SUPERVISOR CONTROLS, SLA, BUSINESS HOURS, OVERFLOW, COPILOT
+-- ============================================================================
+
+alter table public.queues
+  add column if not exists after_hours_action text not null default 'ai_only',
+  add column if not exists sla_first_response_seconds integer not null default 180,
+  add column if not exists sla_warning_seconds integer not null default 60,
+  add column if not exists overflow_after_seconds integer not null default 300;
+
+alter table public.queues
+  drop constraint if exists queues_after_hours_action_check,
+  drop constraint if exists queues_sla_first_response_seconds_check,
+  drop constraint if exists queues_sla_warning_seconds_check,
+  drop constraint if exists queues_overflow_after_seconds_check;
+
+alter table public.queues
+  add constraint queues_after_hours_action_check
+    check (after_hours_action in ('collect_info', 'overflow', 'ai_only')),
+  add constraint queues_sla_first_response_seconds_check
+    check (sla_first_response_seconds >= 0 and sla_first_response_seconds <= 86400),
+  add constraint queues_sla_warning_seconds_check
+    check (sla_warning_seconds >= 0 and sla_warning_seconds <= 86400),
+  add constraint queues_overflow_after_seconds_check
+    check (overflow_after_seconds >= 0 and overflow_after_seconds <= 172800);
+
+alter table public.chats
+  add column if not exists sla_started_at timestamptz,
+  add column if not exists sla_first_response_due_at timestamptz,
+  add column if not exists first_agent_response_at timestamptz,
+  add column if not exists sla_warning_sent_at timestamptz,
+  add column if not exists sla_breached_at timestamptz,
+  add column if not exists overflowed_at timestamptz;
+
+create index if not exists idx_chats_sla_due_pending
+  on public.chats (sla_first_response_due_at asc)
+  where conversation_mode = 'handoff_pending'
+    and sla_first_response_due_at is not null;
+
+create index if not exists idx_chats_sla_warning_pending
+  on public.chats (sla_started_at asc, sla_warning_sent_at asc)
+  where conversation_mode = 'handoff_pending'
+    and sla_breached = false;
+
+alter table public.messages
+  add column if not exists is_draft boolean not null default false;
+
+-- ============================================================================
+-- PHASE 5: SCALE HARDENING + ENTERPRISE FEATURES
+-- ============================================================================
+
+alter table public.queues
+  add column if not exists routing_strategy text not null default 'priority_least_active',
+  add column if not exists is_vip_queue boolean not null default false;
+
+alter table public.queues
+  drop constraint if exists queues_routing_strategy_check;
+
+alter table public.queues
+  add constraint queues_routing_strategy_check
+    check (routing_strategy in ('priority_least_active', 'round_robin'));
+
+alter table public.queue_members
+  add column if not exists skills text[] not null default array[]::text[],
+  add column if not exists handles_vip boolean not null default true,
+  add column if not exists last_assigned_at timestamptz;
+
+alter table public.chats
+  add column if not exists visitor_is_vip boolean not null default false,
+  add column if not exists routing_skill text,
+  add column if not exists archived_at timestamptz;
+
+create index if not exists idx_chats_vip_pending
+  on public.chats (workspace_id, visitor_is_vip, last_message_at desc)
+  where conversation_mode = 'handoff_pending';
+
+create index if not exists idx_chats_routing_skill_pending
+  on public.chats (workspace_id, routing_skill, last_message_at desc)
+  where conversation_mode = 'handoff_pending'
+    and routing_skill is not null;
+
+alter table public.messages
+  add column if not exists dedupe_key text;
+
+create unique index if not exists idx_messages_chat_dedupe_key
+  on public.messages (chat_id, dedupe_key)
+  where dedupe_key is not null;
+
+create table if not exists public.conversation_csat (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null unique references public.chats(id) on delete cascade,
+  tenant_id text not null references public.tenants(tenant_id) on delete cascade,
+  workspace_id text references public.tenants(tenant_id) on delete set null,
+  rating integer not null,
+  feedback text,
+  submitted_by text not null default 'visitor',
+  submitted_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.conversation_csat
+  drop constraint if exists conversation_csat_rating_check,
+  drop constraint if exists conversation_csat_submitted_by_check;
+
+alter table public.conversation_csat
+  add constraint conversation_csat_rating_check
+    check (rating >= 1 and rating <= 5),
+  add constraint conversation_csat_submitted_by_check
+    check (submitted_by in ('visitor', 'agent', 'supervisor', 'system'));
+
+create index if not exists idx_conversation_csat_tenant_submitted
+  on public.conversation_csat (tenant_id, submitted_at desc);
+
+drop trigger if exists conversation_csat_set_updated_at on public.conversation_csat;
+create trigger conversation_csat_set_updated_at
+before update on public.conversation_csat
+for each row
+execute procedure public.set_updated_at();
+
+alter table public.tenants
+  add column if not exists conversation_retention_days integer not null default 365,
+  add column if not exists retention_purge_grace_days integer not null default 30,
+  add column if not exists allow_conversation_export boolean not null default true,
+  add column if not exists csat_enabled boolean not null default true,
+  add column if not exists csat_prompt text not null default 'How was your support experience?';
+
+alter table public.tenants
+  drop constraint if exists tenants_conversation_retention_days_check,
+  drop constraint if exists tenants_retention_purge_grace_days_check,
+  drop constraint if exists tenants_csat_prompt_length_check;
+
+alter table public.tenants
+  add constraint tenants_conversation_retention_days_check
+    check (conversation_retention_days >= 30 and conversation_retention_days <= 3650),
+  add constraint tenants_retention_purge_grace_days_check
+    check (retention_purge_grace_days >= 0 and retention_purge_grace_days <= 3650),
+  add constraint tenants_csat_prompt_length_check
+    check (char_length(trim(csat_prompt)) between 8 and 180);
+
+create index if not exists idx_chats_inbox_assigned_phase5
+  on public.chats (workspace_id, assigned_agent_id, last_message_at desc)
+  where assigned_agent_id is not null
+    and conversation_mode in ('agent_active', 'copilot')
+    and conversation_status in ('active', 'waiting', 'assigned');
+
+create index if not exists idx_chats_inbox_queue_pending_phase5
+  on public.chats (workspace_id, queue_id, last_message_at desc)
+  where conversation_mode = 'handoff_pending'
+    and assigned_agent_id is null
+    and conversation_status in ('active', 'waiting', 'assigned');
