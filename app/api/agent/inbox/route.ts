@@ -3,7 +3,9 @@ import { toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
 import { hasWorkspacePermission } from "@/platform/permissions";
 import { listUserTenantIds, listWorkspaceRolesForUser, resolvePlatformSession } from "@/platform/repository";
-import { listAgentInboxConversations, listQueueIdsForUser } from "@/agent/repository";
+import { listAgentInboxConversations, listQueueIdsForUser, listQueues } from "@/agent/repository";
+
+const WORKSPACE_WIDE_QUEUE_ROLES = new Set(["owner", "admin", "supervisor"]);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,7 +40,14 @@ export async function GET(request: Request) {
     }
 
     const queueIdsByWorkspace = await Promise.all(
-      scopedWorkspaceIds.map((workspaceId) => listQueueIdsForUser(workspaceId, user.id))
+      scopedWorkspaceIds.map(async (workspaceId) => {
+        const workspaceRole = roleMap.get(workspaceId) ?? "viewer";
+        if (WORKSPACE_WIDE_QUEUE_ROLES.has(workspaceRole)) {
+          const queues = await listQueues(workspaceId);
+          return queues.filter((queue) => queue.is_active).map((queue) => queue.id);
+        }
+        return listQueueIdsForUser(workspaceId, user.id);
+      })
     );
     const queueIds = Array.from(new Set(queueIdsByWorkspace.flat()));
 

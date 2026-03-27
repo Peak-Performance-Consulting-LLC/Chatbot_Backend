@@ -4,7 +4,8 @@ import {
   getSubscriptionByUserId,
   getWorkspaceRoleForUser,
   resolvePlatformSession,
-  type WorkspaceRole
+  type WorkspaceRole,
+  type SubscriptionSummary
 } from "@/platform/repository";
 
 export type WorkspacePermission =
@@ -102,15 +103,31 @@ function toPlanLabel(plan: string): string {
   }
 }
 
+function formatAllowedPlanLabels(plans: SubscriptionSummary["plan"][]): string {
+  const labels = plans.map(toPlanLabel);
+  if (labels.length <= 1) {
+    return labels[0] ?? "Enterprise";
+  }
+  if (labels.length === 2) {
+    return `${labels[0]} or ${labels[1]}`;
+  }
+  return `${labels.slice(0, -1).join(", ")}, or ${labels[labels.length - 1]}`;
+}
+
 export async function requireWorkspaceEnterprisePlan(input: {
   workspaceId: string;
   feature: string;
+  allowedPlans?: SubscriptionSummary["plan"][];
 }) {
+  const allowedPlans = input.allowedPlans?.length
+    ? input.allowedPlans
+    : (["enterprise"] as SubscriptionSummary["plan"][]);
+
   const ownerUserId = await getPrimaryPlatformUserIdForTenant(input.workspaceId);
   if (!ownerUserId) {
     throw new HttpError(
       403,
-      `${input.feature} requires an active Enterprise plan for this workspace.`
+      `${input.feature} requires an active ${formatAllowedPlanLabels(allowedPlans)} plan for this workspace.`
     );
   }
 
@@ -118,21 +135,21 @@ export async function requireWorkspaceEnterprisePlan(input: {
   if (!subscription) {
     throw new HttpError(
       403,
-      `${input.feature} requires an active Enterprise plan for this workspace.`
+      `${input.feature} requires an active ${formatAllowedPlanLabels(allowedPlans)} plan for this workspace.`
     );
   }
 
   if (subscription.status !== "active") {
     throw new HttpError(
       403,
-      `${input.feature} requires an active Enterprise plan. Current subscription status is ${subscription.status}.`
+      `${input.feature} requires an active ${formatAllowedPlanLabels(allowedPlans)} plan. Current subscription status is ${subscription.status}.`
     );
   }
 
-  if (subscription.plan !== "enterprise") {
+  if (!allowedPlans.includes(subscription.plan)) {
     throw new HttpError(
       403,
-      `${input.feature} is available on Enterprise only. Current plan: ${toPlanLabel(subscription.plan)}.`
+      `${input.feature} is available on ${formatAllowedPlanLabels(allowedPlans)} only. Current plan: ${toPlanLabel(subscription.plan)}.`
     );
   }
 

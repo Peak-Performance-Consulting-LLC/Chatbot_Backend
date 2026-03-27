@@ -72,7 +72,8 @@ export async function PATCH(
     if (isEnterpriseSlaControlUpdate(parsed.data)) {
       await requireWorkspaceEnterprisePlan({
         workspaceId: parsed.data.tenant_id,
-        feature: "SLA and advanced routing controls"
+        feature: "SLA and advanced routing controls",
+        allowedPlans: ["growth", "enterprise"]
       });
     }
 
