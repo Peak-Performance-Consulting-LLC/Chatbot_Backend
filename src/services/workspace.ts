@@ -8,6 +8,7 @@ import {
   countActiveWorkspaceSeats,
   createWorkspaceInvitation,
   getWorkspaceInvitationByTokenHash,
+  listPendingWorkspaceInvitationsByEmail,
   getWorkspaceSeatLimit,
   listWorkspaceInvitations,
   type WorkspaceInvitationRecord,
@@ -15,15 +16,19 @@ import {
 } from "@/platform/repository";
 import { writeAuditLog } from "@/services/audit";
 import {
+  createQueue,
   findPlatformUserByEmail,
   getWorkspaceMemberByUser,
+  listQueues,
   listWorkspaceMembersWithUser,
   type WorkspaceMemberRole,
+  upsertQueueMember,
   upsertWorkspaceMember
 } from "@/agent/repository";
 
 const MANAGE_TEAM_ROLES: WorkspaceMemberRole[] = ["owner", "admin"];
 const INVITE_TOKEN_TTL_DAYS = 7;
+const DEFAULT_WORKSPACE_QUEUE_NAME = "General Support";
 
 type TeamMemberView = {
   id: string;
@@ -123,6 +128,71 @@ async function assertSeatCapacity(workspaceId: string) {
   if (activeSeats >= seatLimit) {
     throw new HttpError(409, "Workspace seat limit reached. Upgrade your plan to invite more members.");
   }
+}
+
+async function ensureActiveWorkspaceQueues(input: {
+  workspaceId: string;
+  createdBy?: string | null;
+}) {
+  const existing = (await listQueues(input.workspaceId)).filter((queue) => queue.is_active);
+  if (existing.length > 0) {
+    return existing;
+  }
+
+  try {
+    await createQueue({
+      workspace_id: input.workspaceId,
+      tenant_id: input.workspaceId,
+      name: DEFAULT_WORKSPACE_QUEUE_NAME,
+      created_by: input.createdBy ?? undefined
+    });
+  } catch (error) {
+    logError("workspace_queue_auto_create_failed", {
+      workspace_id: input.workspaceId,
+      created_by: input.createdBy ?? null,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  return (await listQueues(input.workspaceId)).filter((queue) => queue.is_active);
+}
+
+async function autoEnrollMemberInActiveQueues(input: {
+  workspaceId: string;
+  workspaceMemberId: string;
+  role: WorkspaceMemberRole;
+  createdBy?: string | null;
+}) {
+  if (input.role === "viewer") {
+    return;
+  }
+
+  const queues = await ensureActiveWorkspaceQueues({
+    workspaceId: input.workspaceId,
+    createdBy: input.createdBy
+  });
+  if (queues.length === 0) {
+    return;
+  }
+
+  await Promise.all(
+    queues.map(async (queue) => {
+      try {
+        await upsertQueueMember({
+          queue_id: queue.id,
+          workspace_member_id: input.workspaceMemberId
+        });
+      } catch (error) {
+        logError("workspace_queue_member_auto_enroll_failed", {
+          workspace_id: input.workspaceId,
+          queue_id: queue.id,
+          workspace_member_id: input.workspaceMemberId,
+          role: input.role,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    })
+  );
 }
 
 async function maybeSendInvitationEmail(input: {
@@ -340,6 +410,17 @@ export async function acceptWorkspaceInvitation(input: {
     throw new HttpError(410, "Invitation has expired");
   }
 
+  return applyInvitationForActor({
+    invitation,
+    actorUserId: input.actorUserId
+  });
+}
+
+async function applyInvitationForActor(input: {
+  invitation: WorkspaceInvitationRecord;
+  actorUserId: string;
+}) {
+  const invitation = input.invitation;
   const roleToApply = normalizeInviteRole(invitation.role);
   const existingMember = await getWorkspaceMemberByUser(invitation.workspace_id, input.actorUserId);
   const roleBefore = existingMember?.role ?? null;
@@ -380,11 +461,66 @@ export async function acceptWorkspaceInvitation(input: {
     throw new HttpError(500, "Invitation accepted but workspace member was not found");
   }
 
+  await autoEnrollMemberInActiveQueues({
+    workspaceId: invitation.workspace_id,
+    workspaceMemberId: member.id,
+    role: member.role,
+    createdBy: invitation.invited_by ?? input.actorUserId
+  });
+
   return {
     member: mapMember(member),
     invitation: mapInvitation({
       ...invitation,
       accepted_at: new Date().toISOString()
     })
+  };
+}
+
+export async function autoAcceptWorkspaceInvitationsForUser(input: {
+  actorUserId: string;
+  actorEmail: string;
+}) {
+  const normalizedEmail = input.actorEmail.trim().toLowerCase();
+  if (!normalizedEmail) {
+    return {
+      accepted: 0
+    };
+  }
+
+  const invitations = await listPendingWorkspaceInvitationsByEmail(normalizedEmail);
+  if (invitations.length === 0) {
+    return {
+      accepted: 0
+    };
+  }
+
+  let accepted = 0;
+
+  for (const invitation of invitations) {
+    const expiresAt = new Date(invitation.expires_at).getTime();
+    if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+      continue;
+    }
+
+    try {
+      await applyInvitationForActor({
+        invitation,
+        actorUserId: input.actorUserId
+      });
+      accepted += 1;
+    } catch (error) {
+      logError("workspace_invitation_auto_accept_failed", {
+        invitation_id: invitation.id,
+        workspace_id: invitation.workspace_id,
+        actor_user_id: input.actorUserId,
+        actor_email: normalizedEmail,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  return {
+    accepted
   };
 }

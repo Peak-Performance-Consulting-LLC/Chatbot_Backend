@@ -13,5 +13,19 @@
     "app/api/platform/workspaces/route.ts": {
       "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/sla-breach",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/presence-maintenance",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/retention",
+      "schedule": "15 3 * * *"
+    }
+  ]
 }

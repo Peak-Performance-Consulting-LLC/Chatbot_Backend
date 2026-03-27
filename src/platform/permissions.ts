@@ -1,5 +1,7 @@
 import { HttpError } from "@/lib/httpError";
 import {
+  getPrimaryPlatformUserIdForTenant,
+  getSubscriptionByUserId,
   getWorkspaceRoleForUser,
   resolvePlatformSession,
   type WorkspaceRole
@@ -85,4 +87,54 @@ export async function requireWorkspacePermission(input: {
     user,
     role
   };
+}
+
+function toPlanLabel(plan: string): string {
+  switch (plan) {
+    case "enterprise":
+      return "Enterprise";
+    case "growth":
+      return "Growth";
+    case "starter":
+      return "Starter";
+    default:
+      return "Trial";
+  }
+}
+
+export async function requireWorkspaceEnterprisePlan(input: {
+  workspaceId: string;
+  feature: string;
+}) {
+  const ownerUserId = await getPrimaryPlatformUserIdForTenant(input.workspaceId);
+  if (!ownerUserId) {
+    throw new HttpError(
+      403,
+      `${input.feature} requires an active Enterprise plan for this workspace.`
+    );
+  }
+
+  const subscription = await getSubscriptionByUserId(ownerUserId);
+  if (!subscription) {
+    throw new HttpError(
+      403,
+      `${input.feature} requires an active Enterprise plan for this workspace.`
+    );
+  }
+
+  if (subscription.status !== "active") {
+    throw new HttpError(
+      403,
+      `${input.feature} requires an active Enterprise plan. Current subscription status is ${subscription.status}.`
+    );
+  }
+
+  if (subscription.plan !== "enterprise") {
+    throw new HttpError(
+      403,
+      `${input.feature} is available on Enterprise only. Current plan: ${toPlanLabel(subscription.plan)}.`
+    );
+  }
+
+  return subscription;
 }

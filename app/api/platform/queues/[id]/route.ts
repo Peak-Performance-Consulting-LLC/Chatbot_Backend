@@ -2,7 +2,10 @@ import { z } from "zod";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import {
+  requireWorkspaceEnterprisePlan,
+  requireWorkspacePermission
+} from "@/platform/permissions";
 import { updateWorkspaceQueue } from "@/services/queue";
 
 export const runtime = "nodejs";
@@ -22,6 +25,19 @@ const patchSchema = z.object({
   sla_warning_seconds: z.number().int().min(0).max(86_400).optional(),
   overflow_after_seconds: z.number().int().min(0).max(172_800).optional()
 });
+
+function isEnterpriseSlaControlUpdate(
+  payload: z.infer<typeof patchSchema>
+): boolean {
+  return (
+    payload.business_hours !== undefined ||
+    payload.after_hours_action !== undefined ||
+    payload.overflow_queue_id !== undefined ||
+    payload.sla_first_response_seconds !== undefined ||
+    payload.sla_warning_seconds !== undefined ||
+    payload.overflow_after_seconds !== undefined
+  );
+}
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
@@ -53,6 +69,12 @@ export async function PATCH(
       workspaceId: parsed.data.tenant_id,
       permission: "queue:manage"
     });
+    if (isEnterpriseSlaControlUpdate(parsed.data)) {
+      await requireWorkspaceEnterprisePlan({
+        workspaceId: parsed.data.tenant_id,
+        feature: "SLA and advanced routing controls"
+      });
+    }
 
     const queue = await updateWorkspaceQueue({
       queueId,

@@ -1,4 +1,5 @@
 import { HttpError } from "@/lib/httpError";
+import { logError } from "@/lib/logger";
 import type { ChatThread } from "@/chat/types";
 import { writeAuditLog } from "@/services/audit";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@/agent/repository";
 
 const MANAGE_QUEUE_ROLES = new Set(["owner", "admin", "supervisor"]);
+const DEFAULT_WORKSPACE_QUEUE_NAME = "General Support";
 
 function assertCanManageQueues(role: string) {
   if (!MANAGE_QUEUE_ROLES.has(role)) {
@@ -311,7 +313,23 @@ export async function resolveConversationQueue(chat: ChatThread): Promise<{
     }
   }
 
-  const fallbackQueue = await getFirstActiveQueue(workspaceId);
+  let fallbackQueue = await getFirstActiveQueue(workspaceId);
+  if (!fallbackQueue) {
+    try {
+      await createQueue({
+        workspace_id: workspaceId,
+        tenant_id: workspaceId,
+        name: DEFAULT_WORKSPACE_QUEUE_NAME
+      });
+    } catch (error) {
+      logError("queue_auto_create_failed", {
+        workspace_id: workspaceId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    fallbackQueue = await getFirstActiveQueue(workspaceId);
+  }
+
   if (!fallbackQueue) {
     await updateChatQueue({
       chat_id: chat.id,

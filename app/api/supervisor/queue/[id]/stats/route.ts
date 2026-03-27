@@ -1,7 +1,10 @@
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import {
+  requireWorkspaceEnterprisePlan,
+  requireWorkspacePermission
+} from "@/platform/permissions";
 import { getQueueById } from "@/agent/repository";
 import { supabaseAdmin } from "@/lib/supabase";
 
@@ -33,6 +36,10 @@ export async function GET(
       token,
       workspaceId: tenantId,
       permission: "conversation:supervise"
+    });
+    await requireWorkspaceEnterprisePlan({
+      workspaceId: tenantId,
+      feature: "Supervisor queue SLA stats"
     });
 
     const queue = await getQueueById(queueId);

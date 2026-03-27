@@ -3,7 +3,10 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import {
+  requireWorkspaceEnterprisePlan,
+  requireWorkspacePermission
+} from "@/platform/permissions";
 import { closeConversation } from "@/services/conversation";
 import { broadcastMessage, broadcastModeChange } from "@/services/notification";
 import { getChatById, insertChatMessage } from "@/chat/repository";
@@ -37,6 +40,10 @@ export async function POST(
       token,
       workspaceId,
       permission: "conversation:supervise"
+    });
+    await requireWorkspaceEnterprisePlan({
+      workspaceId,
+      feature: "Supervisor force-close controls"
     });
 
     await enforceAgentApiRateLimit(`supervisor_force_close:${getClientIp(request)}:${workspaceId}:${user.id}`);

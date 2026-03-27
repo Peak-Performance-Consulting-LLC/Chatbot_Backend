@@ -4,7 +4,10 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import {
+  requireWorkspaceEnterprisePlan,
+  requireWorkspacePermission
+} from "@/platform/permissions";
 import { getChatById, insertChatMessage } from "@/chat/repository";
 import {
   getWorkspaceMemberByUser,
@@ -62,6 +65,10 @@ export async function POST(
       token,
       workspaceId,
       permission: "conversation:supervise"
+    });
+    await requireWorkspaceEnterprisePlan({
+      workspaceId,
+      feature: "Supervisor reassignment controls"
     });
 
     await enforceAgentApiRateLimit(`supervisor_reassign:${getClientIp(request)}:${workspaceId}:${user.id}`);

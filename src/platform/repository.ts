@@ -1446,6 +1446,31 @@ export async function listWorkspaceInvitations(
   return (data ?? []) as WorkspaceInvitationRecord[];
 }
 
+export async function listPendingWorkspaceInvitationsByEmail(
+  email: string
+): Promise<WorkspaceInvitationRecord[]> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail) {
+    return [];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("workspace_invitations")
+    .select("*")
+    .eq("email", normalizedEmail)
+    .is("accepted_at", null)
+    .order("created_at", { ascending: true })
+    .limit(200);
+
+  if (error) {
+    throwPlatformSchemaMissingError(
+      `Failed to list pending workspace invitations: ${error.message}`
+    );
+  }
+
+  return (data ?? []) as WorkspaceInvitationRecord[];
+}
+
 export async function getWorkspaceInvitationByTokenHash(
   tokenHash: string
 ): Promise<WorkspaceInvitationRecord | null> {

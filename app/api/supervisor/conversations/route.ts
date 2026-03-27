@@ -1,7 +1,10 @@
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import {
+  requireWorkspaceEnterprisePlan,
+  requireWorkspacePermission
+} from "@/platform/permissions";
 import { listSupervisorQueueConversations } from "@/services/queue";
 
 export const runtime = "nodejs";
@@ -29,6 +32,10 @@ export async function GET(request: Request) {
       token,
       workspaceId: tenantId,
       permission: "conversation:supervise"
+    });
+    await requireWorkspaceEnterprisePlan({
+      workspaceId: tenantId,
+      feature: "Supervisor dashboard"
     });
 
     const conversations = await listSupervisorQueueConversations({

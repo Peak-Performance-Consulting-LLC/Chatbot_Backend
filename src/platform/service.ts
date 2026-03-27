@@ -8,7 +8,6 @@ import { createPasswordResetToken, hashOpaqueToken } from "@/platform/auth";
 import { sendPlatformPasswordResetEmail } from "@/platform/email";
 import { enforcePlatformPasswordResetRateLimit } from "@/platform/passwordResetRateLimit";
 import {
-  assertTenantOwnership,
   consumePlatformPasswordReset,
   createPlatformSession,
   createPlatformPasswordResetToken,
@@ -20,6 +19,7 @@ import {
   findTenantIdByDomain,
   getDomainVerification,
   getPlatformUserByEmail,
+  getWorkspaceRoleForUser,
   getSubscriptionByStripeSubscriptionId,
   getSubscriptionByUserId,
   getPlatformUsageTrackingStartedAt,
@@ -66,6 +66,7 @@ import {
   toIsoFromStripeTimestamp
 } from "@/platform/stripe";
 import { buildWidgetConfig } from "@/platform/widget";
+import { autoAcceptWorkspaceInvitationsForUser } from "@/services/workspace";
 
 function normalizeWebsiteUrl(input: string): URL {
   const trimmed = input.trim();
@@ -244,6 +245,13 @@ async function getOwnedTenantSummary(userId: string, tenantId: string) {
     throw new HttpError(404, "Tenant not found");
   }
   return tenant;
+}
+
+async function assertWorkspaceAdminAccess(userId: string, workspaceId: string) {
+  const role = await getWorkspaceRoleForUser(userId, workspaceId);
+  if (!role || (role !== "owner" && role !== "admin")) {
+    throw new HttpError(403, "Only workspace owners and admins can perform this action.");
+  }
 }
 
 async function runProvisioningIngest(input: {
@@ -533,7 +541,7 @@ export async function updatePlatformTenantProfile(input: {
   csat_prompt?: string;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
 
   await updateTenantBusinessProfile(input.tenant_id, {
     business_type: input.business_type,
@@ -581,7 +589,7 @@ export async function updatePlatformTenantDomain(input: {
   website_url: string;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
 
   const website = normalizeWebsiteUrl(input.website_url);
   const domain = website.hostname.toLowerCase();
@@ -607,6 +615,10 @@ export async function updatePlatformTenantDomain(input: {
 
 export async function loginPlatformUser(input: { email: string; password: string }) {
   const user = await validatePlatformCredentials(input);
+  await autoAcceptWorkspaceInvitationsForUser({
+    actorUserId: user.id,
+    actorEmail: user.email
+  });
   const session = await createPlatformSession(user.id);
   const tenants = await listUserTenants(user.id);
 
@@ -689,6 +701,10 @@ export async function loginPlatformUserWithOAuth(input: PlatformOauthProfile) {
     email: input.email,
     fullName: input.full_name,
     avatarUrl: input.avatar_url
+  });
+  await autoAcceptWorkspaceInvitationsForUser({
+    actorUserId: user.id,
+    actorEmail: user.email
   });
   const session = await createPlatformSession(user.id);
   const tenants = await listUserTenants(user.id);
@@ -1831,7 +1847,10 @@ export async function getPlatformVisitorContacts(input: {
   offset: number;
 }): Promise<PlatformVisitorContactsResponse> {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  const role = await getWorkspaceRoleForUser(user.id, input.tenant_id);
+  if (!role || (role !== "owner" && role !== "admin")) {
+    throw new HttpError(403, "Only workspace owners and admins can view captured users.");
+  }
 
   const { contacts, total } = await listTenantVisitorContacts({
     tenant_id: input.tenant_id,
@@ -1879,6 +1898,10 @@ export async function enforcePlanLimits(userId: string, action: "create_tenant")
 
 export async function getPlatformProfile(token: string) {
   const user = await resolvePlatformSession(token);
+  await autoAcceptWorkspaceInvitationsForUser({
+    actorUserId: user.id,
+    actorEmail: user.email
+  });
   const tenants = await listUserTenants(user.id);
   const subscription = await ensureUserSubscription(user.id);
 
@@ -1894,7 +1917,7 @@ export async function verifyTenantDomain(input: {
   tenant_id: string;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
 
   const verification = await getDomainVerification(input.tenant_id);
   if (!verification) {
@@ -1936,7 +1959,7 @@ export async function runTenantIngestion(input: {
   replace?: boolean;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
 
   const sources = await listTenantSources(input.tenant_id);
   if (sources.length === 0) {
@@ -2003,7 +2026,7 @@ export async function getTenantSourcesForUser(input: {
   tenant_id: string;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
   const sources = await listTenantSources(input.tenant_id);
 
   return {
@@ -2018,7 +2041,7 @@ export async function replaceTenantSourcesForUser(input: {
   sources: Array<{ source_type: "sitemap" | "url" | "faq" | "doc_text"; source_value: string }>;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
 
   await replaceTenantSources(input.tenant_id, input.sources);
   const normalizedSources = input.sources.map((source) => ({
@@ -2051,7 +2074,7 @@ export async function deletePlatformWorkspace(input: {
   tenant_id: string;
 }) {
   const user = await resolvePlatformSession(input.token);
-  await assertTenantOwnership(user.id, input.tenant_id);
+  await assertWorkspaceAdminAccess(user.id, input.tenant_id);
   await deleteTenantById(input.tenant_id);
   return { tenant_id: input.tenant_id, deleted: true };
 }
