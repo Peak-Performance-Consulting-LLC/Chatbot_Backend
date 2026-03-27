@@ -8,7 +8,11 @@ import {
   requireWorkspacePermission
 } from "@/platform/permissions";
 import { closeConversation } from "@/services/conversation";
-import { broadcastMessage, broadcastModeChange } from "@/services/notification";
+import {
+  broadcastMessage,
+  broadcastModeChange,
+  broadcastWorkspaceInboxUpdate
+} from "@/services/notification";
 import { getChatById, insertChatMessage } from "@/chat/repository";
 import { writeAuditLog } from "@/services/audit";
 
@@ -82,6 +86,13 @@ export async function POST(
         }
       })
     ]);
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: chat.tenant_id,
+      queue_id: updated.queue_id ?? null,
+      mode: "closed",
+      reason: "conversation_force_closed"
+    });
 
     return jsonCorsResponse(request, {
       chat_id: chatId,

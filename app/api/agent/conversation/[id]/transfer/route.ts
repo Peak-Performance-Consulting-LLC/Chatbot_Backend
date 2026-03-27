@@ -15,7 +15,8 @@ import {
   broadcastAgentNotification,
   broadcastMessage,
   broadcastModeChange,
-  broadcastQueueConversation
+  broadcastQueueConversation,
+  broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
 import { transferConversationToAgent, transferConversationToQueue } from "@/services/transfer";
 import { writeAuditLog } from "@/services/audit";
@@ -150,6 +151,13 @@ export async function POST(
           }
         })
       ]);
+      await broadcastWorkspaceInboxUpdate(workspaceId, {
+        chat_id: chatId,
+        tenant_id: chat.tenant_id,
+        queue_id: updated.queue_id ?? null,
+        mode: updated.conversation_mode,
+        reason: "conversation_transferred_to_agent"
+      });
 
       return jsonCorsResponse(request, {
         chat_id: chatId,
@@ -201,6 +209,13 @@ export async function POST(
         }
       })
     ]);
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: chat.tenant_id,
+      queue_id: updated.queue_id ?? null,
+      mode: updated.conversation_mode,
+      reason: "conversation_transferred_to_queue"
+    });
 
     return jsonCorsResponse(request, {
       chat_id: chatId,

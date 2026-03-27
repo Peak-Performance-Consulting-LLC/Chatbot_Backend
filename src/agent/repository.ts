@@ -58,6 +58,14 @@ export type AgentPresenceRecord = {
   last_heartbeat_at: string | null;
 };
 
+type VisitorContactSnapshot = {
+  tenant_id: string;
+  device_id: string;
+  full_name: string;
+  email: string;
+  phone_raw: string;
+};
+
 export type AgentInboxPayload = {
   my_active: ChatThread[];
   queue_unassigned: ChatThread[];
@@ -571,9 +579,14 @@ export async function listAgentInboxConversations(input: {
     queueUnassigned = (data ?? []) as ChatThread[];
   }
 
+  const [myActiveWithContact, queueUnassignedWithContact] = await Promise.all([
+    enrichConversationsWithVisitorContact((myActive ?? []) as ChatThread[]),
+    enrichConversationsWithVisitorContact(queueUnassigned)
+  ]);
+
   return {
-    my_active: (myActive ?? []) as ChatThread[],
-    queue_unassigned: queueUnassigned
+    my_active: myActiveWithContact,
+    queue_unassigned: queueUnassignedWithContact
   };
 }
 
@@ -684,7 +697,74 @@ export async function listQueueConversations(input: {
     throw new HttpError(500, `Failed to load queue conversations: ${error.message}`);
   }
 
-  return (data ?? []) as ChatThread[];
+  return enrichConversationsWithVisitorContact((data ?? []) as ChatThread[]);
+}
+
+function isCompleteVisitorContact(contact: VisitorContactSnapshot | null | undefined): boolean {
+  if (!contact) {
+    return false;
+  }
+  return Boolean(contact.full_name?.trim() && contact.email?.trim() && contact.phone_raw?.trim());
+}
+
+function toContactKey(tenantId: string, deviceId: string): string {
+  return `${tenantId}:${deviceId}`;
+}
+
+async function enrichConversationsWithVisitorContact(
+  conversations: ChatThread[]
+): Promise<ChatThread[]> {
+  if (conversations.length === 0) {
+    return [];
+  }
+
+  const tenantIds = Array.from(
+    new Set(conversations.map((conversation) => conversation.tenant_id).filter(Boolean))
+  );
+  const deviceIds = Array.from(
+    new Set(conversations.map((conversation) => conversation.device_id).filter(Boolean))
+  );
+
+  if (tenantIds.length === 0 || deviceIds.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("visitor_contacts")
+    .select("tenant_id, device_id, full_name, email, phone_raw")
+    .in("tenant_id", tenantIds)
+    .in("device_id", deviceIds);
+
+  if (error) {
+    throw new HttpError(500, `Failed to load visitor contacts for conversations: ${error.message}`);
+  }
+
+  const contactByTenantDevice = new Map<string, VisitorContactSnapshot>();
+  for (const row of (data ?? []) as VisitorContactSnapshot[]) {
+    if (!isCompleteVisitorContact(row)) {
+      continue;
+    }
+    contactByTenantDevice.set(toContactKey(row.tenant_id, row.device_id), row);
+  }
+
+  return conversations
+    .map((conversation) => {
+      const contact = contactByTenantDevice.get(
+        toContactKey(conversation.tenant_id, conversation.device_id)
+      );
+      if (!contact) {
+        return null;
+      }
+
+      return {
+        ...conversation,
+        visitor_name: contact.full_name.trim(),
+        visitor_email: contact.email.trim().toLowerCase(),
+        visitor_phone: contact.phone_raw.trim(),
+        visitor_contact_captured: true
+      } as ChatThread;
+    })
+    .filter(Boolean) as ChatThread[];
 }
 
 export async function listWorkspaceSupervisors(workspaceId: string): Promise<Array<{

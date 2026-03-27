@@ -18,7 +18,8 @@ import { transferConversationToAgent } from "@/services/transfer";
 import {
   broadcastAgentNotification,
   broadcastMessage,
-  broadcastModeChange
+  broadcastModeChange,
+  broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
 import { writeAuditLog } from "@/services/audit";
 
@@ -141,6 +142,13 @@ export async function POST(
         }
       })
     ]);
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: chat.tenant_id,
+      queue_id: updated.queue_id ?? null,
+      mode: updated.conversation_mode,
+      reason: "conversation_supervisor_reassigned"
+    });
 
     return jsonCorsResponse(request, {
       chat_id: chatId,

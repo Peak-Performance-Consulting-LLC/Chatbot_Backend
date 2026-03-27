@@ -9,6 +9,7 @@ import { visitorContactInputSchema } from "@/chat/schemas";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
+import { broadcastWorkspaceInboxUpdate } from "@/services/notification";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,9 +43,9 @@ export async function POST(request: Request) {
     await assertTenantDomainAccess(request, parsed.data.tenant_id);
     const existingContact = await getVisitorContactByTenantDevice(parsed.data.tenant_id, parsed.data.device_id);
 
-    if (parsed.data.chat_id) {
-      await assertChatOwnership(parsed.data.chat_id, parsed.data.tenant_id, parsed.data.device_id);
-    }
+    const ownedChat = parsed.data.chat_id
+      ? await assertChatOwnership(parsed.data.chat_id, parsed.data.tenant_id, parsed.data.device_id)
+      : null;
 
     const contact = await upsertVisitorContact({
       tenant_id: parsed.data.tenant_id,
@@ -64,6 +65,23 @@ export async function POST(request: Request) {
         content: `Thanks, ${displayName}. Nice to meet you. How can I help you next?`
       });
       await touchChatThread(parsed.data.chat_id);
+    }
+
+    const hasCompleteContact = Boolean(
+      contact.full_name?.trim() &&
+        contact.email?.trim() &&
+        contact.phone_raw?.trim()
+    );
+    if (hasCompleteContact) {
+      const workspaceId = ownedChat?.workspace_id ?? parsed.data.tenant_id;
+      await broadcastWorkspaceInboxUpdate(workspaceId, {
+        chat_id: ownedChat?.id ?? contact.chat_id ?? undefined,
+        tenant_id: parsed.data.tenant_id,
+        queue_id: ownedChat?.queue_id ?? null,
+        mode: ownedChat?.conversation_mode ?? undefined,
+        reason: "visitor_contact_submitted",
+        visitor_contact_captured: true
+      });
     }
 
     return jsonCorsResponse(request, { ok: true, contact, greeting_message: greetingMessage }, 200);

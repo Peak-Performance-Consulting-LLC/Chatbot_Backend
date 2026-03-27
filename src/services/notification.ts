@@ -124,6 +124,39 @@ export async function broadcastQueueConversation(
   }
 }
 
+export async function broadcastWorkspaceInboxUpdate(
+  workspaceId: string,
+  payload: {
+    workspace_id?: string;
+    chat_id?: string;
+    tenant_id?: string;
+    queue_id?: string | null;
+    mode?: ConversationMode;
+    reason: string;
+    [key: string]: unknown;
+  }
+): Promise<void> {
+  try {
+    await broadcastToChannel(`workspace:${workspaceId}`, "inbox_update", {
+      ...payload,
+      workspace_id: payload.workspace_id ?? workspaceId,
+      triggered_at: new Date().toISOString()
+    });
+    logInfo("realtime_workspace_inbox_update_broadcast", {
+      workspace_id: workspaceId,
+      reason: payload.reason,
+      chat_id: payload.chat_id ?? null
+    });
+  } catch (error) {
+    logError("realtime_workspace_inbox_update_broadcast_failed", {
+      workspace_id: workspaceId,
+      reason: payload.reason,
+      chat_id: payload.chat_id ?? null,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
 export async function broadcastAgentNotification(
   agentId: string,
   event: "assignment" | "presence" | "inbox_update",

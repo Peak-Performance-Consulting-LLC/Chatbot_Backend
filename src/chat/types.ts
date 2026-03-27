@@ -119,6 +119,10 @@ export type ChatThread = {
   visitor_is_vip: boolean;
   routing_skill: string | null;
   archived_at: string | null;
+  visitor_name?: string | null;
+  visitor_email?: string | null;
+  visitor_phone?: string | null;
+  visitor_contact_captured?: boolean;
   created_at: string;
   updated_at: string;
   last_message_at: string;

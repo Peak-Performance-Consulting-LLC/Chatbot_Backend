@@ -6,7 +6,12 @@ import { parseBearerToken } from "@/platform/auth";
 import { requireWorkspacePermission } from "@/platform/permissions";
 import { acceptConversation, getModeTransitionMessage } from "@/services/conversation";
 import { isUserMemberOfQueue, touchQueueMemberLastAssigned } from "@/agent/repository";
-import { broadcastAgentNotification, broadcastModeChange, broadcastMessage } from "@/services/notification";
+import {
+  broadcastAgentNotification,
+  broadcastModeChange,
+  broadcastMessage,
+  broadcastWorkspaceInboxUpdate
+} from "@/services/notification";
 import { getChatById, insertChatMessage } from "@/chat/repository";
 import { writeAuditLog } from "@/services/audit";
 
@@ -87,6 +92,13 @@ export async function POST(
       chat_id: chatId,
       mode: "agent_active",
       queue_id: chat.queue_id ?? null
+    });
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: chat.tenant_id,
+      queue_id: chat.queue_id ?? null,
+      mode: "agent_active",
+      reason: "conversation_accepted"
     });
     await writeAuditLog({
       workspaceId,

@@ -20,9 +20,15 @@ import {
   broadcastAgentNotification,
   broadcastModeChange,
   broadcastMessage,
-  broadcastQueueConversation
+  broadcastQueueConversation,
+  broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
-import { insertChatMessage, assertChatOwnership, getLatestUserMessage } from "@/chat/repository";
+import {
+  insertChatMessage,
+  assertChatOwnership,
+  getLatestUserMessage,
+  getVisitorContactByTenantDevice
+} from "@/chat/repository";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 import { writeAuditLog } from "@/services/audit";
 import { z } from "zod";
@@ -39,6 +45,17 @@ const handoffBodySchema = z.object({
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
+}
+
+function isCompleteVisitorContact(contact: {
+  full_name?: string | null;
+  email?: string | null;
+  phone_raw?: string | null;
+} | null) {
+  if (!contact) {
+    return false;
+  }
+  return Boolean(contact.full_name?.trim() && contact.email?.trim() && contact.phone_raw?.trim());
 }
 
 /**
@@ -80,6 +97,21 @@ export async function POST(
 
     if (!isHandoffEnabledForTenant(parsed.data.tenant_id)) {
       throw new HttpError(403, "Live agent handoff is not enabled for this tenant.");
+    }
+
+    const visitorContact = await getVisitorContactByTenantDevice(
+      parsed.data.tenant_id,
+      parsed.data.device_id
+    );
+    if (!isCompleteVisitorContact(visitorContact)) {
+      return jsonCorsResponse(
+        request,
+        {
+          error: "Please share your name, email, and phone before connecting to a live agent.",
+          requires_contact_capture: true
+        },
+        409
+      );
     }
 
     // Queue-aware handoff: conversation must belong to an active queue.
@@ -265,6 +297,13 @@ export async function POST(
     await broadcastModeChange(chatId, "handoff_pending", {
       queue_id: targetQueue.id
     });
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: parsed.data.tenant_id,
+      queue_id: targetQueue.id,
+      mode: "handoff_pending",
+      reason: "handoff_requested"
+    });
 
     // Auto-assign routing path
     if (targetQueue.routing_mode === "auto_assign") {
@@ -309,6 +348,13 @@ export async function POST(
           mode: "agent_active",
           queue_id: targetQueue.id
         });
+        await broadcastWorkspaceInboxUpdate(workspaceId, {
+          chat_id: chatId,
+          tenant_id: parsed.data.tenant_id,
+          queue_id: targetQueue.id,
+          mode: "agent_active",
+          reason: "conversation_assigned"
+        });
         await writeAuditLog({
           workspaceId,
           actorUserId: eligibleAgent.userId,
@@ -351,6 +397,13 @@ export async function POST(
       tenant_id: parsed.data.tenant_id,
       mode: "handoff_pending",
       queue_id: targetQueue.id
+    });
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: parsed.data.tenant_id,
+      queue_id: targetQueue.id,
+      mode: "handoff_pending",
+      reason: "conversation_queued"
     });
     await writeAuditLog({
       workspaceId,

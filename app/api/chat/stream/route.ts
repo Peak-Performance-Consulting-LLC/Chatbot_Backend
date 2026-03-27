@@ -678,8 +678,15 @@ export async function POST(request: Request) {
 
       // Broadcast message to agent via Supabase Realtime
       try {
-        const { broadcastMessage } = await import("@/services/notification");
+        const { broadcastMessage, broadcastWorkspaceInboxUpdate } = await import("@/services/notification");
         await broadcastMessage(chatId, visitorMessage);
+        await broadcastWorkspaceInboxUpdate(thread.workspace_id ?? thread.tenant_id, {
+          chat_id: chatId,
+          tenant_id: thread.tenant_id,
+          queue_id: thread.queue_id ?? null,
+          mode: conversationMode,
+          reason: "visitor_message_live_mode"
+        });
       } catch (err) {
         logError("realtime_visitor_message_broadcast_failed", {
           request_id: requestId,

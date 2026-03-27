@@ -5,7 +5,11 @@ import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
 import { requireWorkspacePermission } from "@/platform/permissions";
 import { returnToAI, getModeTransitionMessage } from "@/services/conversation";
-import { broadcastModeChange, broadcastMessage } from "@/services/notification";
+import {
+  broadcastModeChange,
+  broadcastMessage,
+  broadcastWorkspaceInboxUpdate
+} from "@/services/notification";
 import { getChatById, insertChatMessage } from "@/chat/repository";
 import { writeAuditLog } from "@/services/audit";
 
@@ -64,6 +68,13 @@ export async function POST(
 
     // Broadcast mode change
     await broadcastModeChange(chatId, "returned_to_ai");
+    await broadcastWorkspaceInboxUpdate(workspaceId, {
+      chat_id: chatId,
+      tenant_id: chat.tenant_id,
+      queue_id: chat.queue_id ?? null,
+      mode: "returned_to_ai",
+      reason: "conversation_returned_to_ai"
+    });
     await writeAuditLog({
       workspaceId,
       actorUserId: user.id,
