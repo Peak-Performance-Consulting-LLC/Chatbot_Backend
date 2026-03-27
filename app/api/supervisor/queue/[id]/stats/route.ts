@@ -39,7 +39,8 @@ export async function GET(
     });
     await requireWorkspaceEnterprisePlan({
       workspaceId: tenantId,
-      feature: "Supervisor queue SLA stats"
+      feature: "Supervisor queue SLA stats",
+      allowedPlans: ["growth", "enterprise"]
     });
 
     const queue = await getQueueById(queueId);

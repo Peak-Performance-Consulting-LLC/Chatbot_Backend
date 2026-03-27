@@ -68,7 +68,8 @@ export async function POST(
     });
     await requireWorkspaceEnterprisePlan({
       workspaceId,
-      feature: "Supervisor reassignment controls"
+      feature: "Supervisor reassignment controls",
+      allowedPlans: ["growth", "enterprise"]
     });
 
     await enforceAgentApiRateLimit(`supervisor_reassign:${getClientIp(request)}:${workspaceId}:${user.id}`);

@@ -43,7 +43,8 @@ export async function POST(
     });
     await requireWorkspaceEnterprisePlan({
       workspaceId,
-      feature: "Supervisor force-close controls"
+      feature: "Supervisor force-close controls",
+      allowedPlans: ["growth", "enterprise"]
     });
 
     await enforceAgentApiRateLimit(`supervisor_force_close:${getClientIp(request)}:${workspaceId}:${user.id}`);

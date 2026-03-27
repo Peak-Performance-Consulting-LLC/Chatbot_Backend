@@ -35,7 +35,8 @@ export async function GET(request: Request) {
     });
     await requireWorkspaceEnterprisePlan({
       workspaceId: tenantId,
-      feature: "Supervisor dashboard"
+      feature: "Supervisor dashboard",
+      allowedPlans: ["growth", "enterprise"]
     });
 
     const conversations = await listSupervisorQueueConversations({
