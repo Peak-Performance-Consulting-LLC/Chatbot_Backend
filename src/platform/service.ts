@@ -1209,6 +1209,7 @@ function calculateAgentUtilization(input: {
   tenantIds: string[];
   capacities: PlatformAgentCapacitySnapshotRow[];
   activeAssigned: Array<{ tenant_id: string; assigned_agent_id: string }>;
+  userId?: string | null;
 }): number | null {
   if (input.tenantIds.length === 0) {
     return null;
@@ -1217,6 +1218,9 @@ function calculateAgentUtilization(input: {
   const capacityByAgent = new Map<string, number>();
   for (const row of input.capacities) {
     if (!input.tenantIds.includes(row.tenant_id)) {
+      continue;
+    }
+    if (input.userId && row.user_id !== input.userId) {
       continue;
     }
     const key = `${row.tenant_id}:${row.user_id}`;
@@ -1235,6 +1239,9 @@ function calculateAgentUtilization(input: {
   const activeByAgent = new Map<string, number>();
   for (const row of input.activeAssigned) {
     if (!input.tenantIds.includes(row.tenant_id)) {
+      continue;
+    }
+    if (input.userId && row.assigned_agent_id !== input.userId) {
       continue;
     }
     const key = `${row.tenant_id}:${row.assigned_agent_id}`;
@@ -1412,6 +1419,7 @@ function aggregateAnalyticsScope(input: {
   timezone: string;
   messageQuotaUsed: number;
   messageQuotaLimit: number;
+  assignedAgentId?: string | null;
 }): PlatformAnalyticsScope {
   const bucketMap = new Map<
     string,
@@ -1552,7 +1560,8 @@ function aggregateAnalyticsScope(input: {
   const agentUtilization = calculateAgentUtilization({
     tenantIds: input.tenantIds,
     capacities: input.capacities,
-    activeAssigned: input.activeAssigned
+    activeAssigned: input.activeAssigned,
+    userId: input.assignedAgentId ?? null
   });
   const trend = input.bucketKeys.map((bucketKey) => {
     const bucket = bucketMap.get(bucketKey);
@@ -1683,17 +1692,14 @@ export async function getPlatformAnalytics(input: {
   const tenantMap = new Map(tenants.map((tenant) => [tenant.tenant_id, tenant]));
   const selectedTenant = input.tenant_id ? tenantMap.get(input.tenant_id) ?? null : null;
   const selectedRole = selectedTenant?.workspace_role ?? null;
-  const restrictToSelectedTenant =
-    Boolean(selectedTenant) &&
-    selectedRole !== "owner" &&
-    selectedRole !== "admin";
+  const isAgentRole = selectedRole === "agent";
 
   if (input.tenant_id && !selectedTenant) {
     throw new HttpError(404, "Tenant not found");
   }
 
   const ownedTenantIds = tenants.map((tenant) => tenant.tenant_id);
-  const analyticsTenantIds = restrictToSelectedTenant && selectedTenant
+  const analyticsTenantIds = selectedTenant
     ? [selectedTenant.tenant_id]
     : ownedTenantIds;
   const rangeWindow = getAnalyticsDateRange(input.range, subscription, timezone);
@@ -1769,38 +1775,74 @@ export async function getPlatformAnalytics(input: {
     rangeWindow.endKey
   );
 
-  const accountScope = aggregateAnalyticsScope({
-    messages: filteredRangeMessages,
-    usageEvents: filteredRangeUsageEvents,
-    conversations: filteredRangeConversations,
-    csatRows: filteredRangeCsat,
-    tenantIds: analyticsTenantIds,
-    capacities: utilizationCapacities,
-    activeAssigned: utilizationActiveAssigned,
-    bucketKeys: rangeWindow.bucketKeys,
-    timezone,
-    messageQuotaUsed: currentPeriodUserMessageCount,
-    messageQuotaLimit: subscription.max_messages_mo
-  });
-
-  const workspaceMessages = selectedTenant
+  const workspaceMessagesBase = selectedTenant
     ? filteredRangeMessages.filter((row) => row.tenant_id === selectedTenant.tenant_id)
     : [];
-  const workspaceUsageEvents = selectedTenant
+  const workspaceUsageEventsBase = selectedTenant
     ? filteredRangeUsageEvents.filter((row) => row.tenant_id === selectedTenant.tenant_id)
     : [];
-  const workspaceConversations = selectedTenant
+  const workspaceConversationsBase = selectedTenant
     ? filteredRangeConversations.filter((row) => row.tenant_id === selectedTenant.tenant_id)
     : [];
-  const workspaceCsat = selectedTenant
+  const workspaceCsatBase = selectedTenant
     ? filteredRangeCsat.filter((row) => row.tenant_id === selectedTenant.tenant_id)
     : [];
-  const workspaceCurrentPeriodMessages = selectedTenant
+  const workspaceCurrentPeriodMessagesBase = selectedTenant
     ? currentPeriodMessages.filter((row) => row.tenant_id === selectedTenant.tenant_id)
+    : [];
+
+  const workspaceConversationIds = new Set(
+    workspaceConversationsBase
+      .filter((row) => !isAgentRole || row.assigned_agent_id === user.id)
+      .map((row) => row.id)
+  );
+
+  const workspaceMessages = selectedTenant
+    ? workspaceMessagesBase.filter((row) => workspaceConversationIds.has(row.chat_id))
+    : [];
+  const workspaceUsageEvents = selectedTenant
+    ? workspaceUsageEventsBase.filter((row) => workspaceConversationIds.has(row.chat_id))
+    : [];
+  const workspaceConversations = selectedTenant
+    ? workspaceConversationsBase.filter((row) => workspaceConversationIds.has(row.id))
+    : [];
+  const workspaceCsat = selectedTenant
+    ? workspaceCsatBase.filter((row) => workspaceConversationIds.has(row.chat_id))
+    : [];
+  const workspaceCurrentPeriodMessages = selectedTenant
+    ? workspaceCurrentPeriodMessagesBase.filter((row) => workspaceConversationIds.has(row.chat_id))
     : [];
   const workspaceCurrentPeriodUserMessages = workspaceCurrentPeriodMessages.filter(
     (row) => row.role === "user"
   );
+
+  const accountMessages = isAgentRole && selectedTenant ? workspaceMessages : filteredRangeMessages;
+  const accountUsageEvents =
+    isAgentRole && selectedTenant ? workspaceUsageEvents : filteredRangeUsageEvents;
+  const accountConversations =
+    isAgentRole && selectedTenant ? workspaceConversations : filteredRangeConversations;
+  const accountCsat = isAgentRole && selectedTenant ? workspaceCsat : filteredRangeCsat;
+  const accountTenantIds =
+    isAgentRole && selectedTenant ? [selectedTenant.tenant_id] : analyticsTenantIds;
+  const accountMessageQuotaUsed =
+    isAgentRole && selectedTenant
+      ? workspaceCurrentPeriodUserMessages.length
+      : currentPeriodUserMessageCount;
+
+  const accountScope = aggregateAnalyticsScope({
+    messages: accountMessages,
+    usageEvents: accountUsageEvents,
+    conversations: accountConversations,
+    csatRows: accountCsat,
+    tenantIds: accountTenantIds,
+    capacities: utilizationCapacities,
+    activeAssigned: utilizationActiveAssigned,
+    bucketKeys: rangeWindow.bucketKeys,
+    timezone,
+    messageQuotaUsed: accountMessageQuotaUsed,
+    messageQuotaLimit: subscription.max_messages_mo,
+    assignedAgentId: isAgentRole ? user.id : null
+  });
 
   const response: PlatformAnalyticsResponse = {
     range: input.range,
@@ -1811,15 +1853,13 @@ export async function getPlatformAnalytics(input: {
       ...accountScope,
       workspaces: buildWorkspaceRows({
         tenantMap,
-        messages: filteredRangeMessages,
-        usageEvents: filteredRangeUsageEvents,
-        conversations: filteredRangeConversations,
+        messages: accountMessages,
+        usageEvents: accountUsageEvents,
+        conversations: accountConversations,
         capacities: utilizationCapacities,
         activeAssigned: utilizationActiveAssigned
       }),
-      health: buildHealthSummary(
-        restrictToSelectedTenant && selectedTenant ? [selectedTenant] : tenants
-      )
+      health: buildHealthSummary(selectedTenant ? [selectedTenant] : tenants)
     },
     workspace: selectedTenant
       ? {
@@ -1839,7 +1879,8 @@ export async function getPlatformAnalytics(input: {
             bucketKeys: rangeWindow.bucketKeys,
             timezone,
             messageQuotaUsed: workspaceCurrentPeriodUserMessages.length,
-            messageQuotaLimit: subscription.max_messages_mo
+            messageQuotaLimit: subscription.max_messages_mo,
+            assignedAgentId: isAgentRole ? user.id : null
           })
         }
       : null
