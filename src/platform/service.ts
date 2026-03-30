@@ -1682,12 +1682,20 @@ export async function getPlatformAnalytics(input: {
   ]);
   const tenantMap = new Map(tenants.map((tenant) => [tenant.tenant_id, tenant]));
   const selectedTenant = input.tenant_id ? tenantMap.get(input.tenant_id) ?? null : null;
+  const selectedRole = selectedTenant?.workspace_role ?? null;
+  const restrictToSelectedTenant =
+    Boolean(selectedTenant) &&
+    selectedRole !== "owner" &&
+    selectedRole !== "admin";
 
   if (input.tenant_id && !selectedTenant) {
     throw new HttpError(404, "Tenant not found");
   }
 
   const ownedTenantIds = tenants.map((tenant) => tenant.tenant_id);
+  const analyticsTenantIds = restrictToSelectedTenant && selectedTenant
+    ? [selectedTenant.tenant_id]
+    : ownedTenantIds;
   const rangeWindow = getAnalyticsDateRange(input.range, subscription, timezone);
 
   const [
@@ -1702,37 +1710,37 @@ export async function getPlatformAnalytics(input: {
   ] =
     await Promise.all([
       listPlatformAnalyticsMessages({
-        tenant_ids: ownedTenantIds,
+        tenant_ids: analyticsTenantIds,
         start_at: rangeWindow.queryStartAt,
         end_at: rangeWindow.endAt
       }),
       listPlatformUsageEvents({
-        tenant_ids: ownedTenantIds,
+        tenant_ids: analyticsTenantIds,
         start_at: rangeWindow.queryStartAt,
         end_at: rangeWindow.endAt
       }),
       listPlatformAnalyticsConversations({
-        tenant_ids: ownedTenantIds,
+        tenant_ids: analyticsTenantIds,
         start_at: rangeWindow.queryStartAt,
         end_at: rangeWindow.endAt
       }),
       listPlatformAnalyticsCsat({
-        tenant_ids: ownedTenantIds,
+        tenant_ids: analyticsTenantIds,
         start_at: rangeWindow.queryStartAt,
         end_at: rangeWindow.endAt
       }),
       listPlatformAgentCapacitySnapshots({
-        tenant_ids: ownedTenantIds
+        tenant_ids: analyticsTenantIds
       }),
       listPlatformActiveAssignedChats({
-        tenant_ids: ownedTenantIds
+        tenant_ids: analyticsTenantIds
       }),
       listPlatformAnalyticsMessages({
-        tenant_ids: ownedTenantIds,
+        tenant_ids: analyticsTenantIds,
         start_at: subscription.current_period_start,
         end_at: rangeWindow.endAt
       }),
-      getPlatformUsageTrackingStartedAt(ownedTenantIds)
+      getPlatformUsageTrackingStartedAt(analyticsTenantIds)
     ]);
   const currentPeriodUserMessageCount = currentPeriodMessages.filter((row) => row.role === "user").length;
 
@@ -1766,7 +1774,7 @@ export async function getPlatformAnalytics(input: {
     usageEvents: filteredRangeUsageEvents,
     conversations: filteredRangeConversations,
     csatRows: filteredRangeCsat,
-    tenantIds: ownedTenantIds,
+    tenantIds: analyticsTenantIds,
     capacities: utilizationCapacities,
     activeAssigned: utilizationActiveAssigned,
     bucketKeys: rangeWindow.bucketKeys,
@@ -1809,7 +1817,9 @@ export async function getPlatformAnalytics(input: {
         capacities: utilizationCapacities,
         activeAssigned: utilizationActiveAssigned
       }),
-      health: buildHealthSummary(tenants)
+      health: buildHealthSummary(
+        restrictToSelectedTenant && selectedTenant ? [selectedTenant] : tenants
+      )
     },
     workspace: selectedTenant
       ? {

@@ -234,6 +234,7 @@ export type TenantSummary = {
   name: string | null;
   allowed_domains: string[];
   workspace_role?: WorkspaceRole | null;
+  subscription?: SubscriptionSummary | null;
   business_profile: TenantBusinessProfile;
   knowledge_base: TenantKnowledgeState;
   retention: TenantRetentionSettings;
@@ -1971,6 +1972,52 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     throwPlatformSchemaMissingError(`Failed to load domain verification records: ${verificationError.message}`);
   }
 
+  const { data: ownershipRows, error: ownershipError } = await supabaseAdmin
+    .from("platform_user_tenants")
+    .select("tenant_id, user_id, created_at")
+    .in("tenant_id", tenantIds)
+    .order("created_at", { ascending: true });
+
+  if (ownershipError) {
+    throwPlatformSchemaMissingError(`Failed to load tenant owners: ${ownershipError.message}`);
+  }
+
+  const ownerByTenant = new Map<string, string>();
+  for (const row of (ownershipRows ?? []) as Array<{
+    tenant_id: string | null;
+    user_id: string | null;
+    created_at: string | null;
+  }>) {
+    const tenantId = row.tenant_id?.trim();
+    const ownerUserId = row.user_id?.trim();
+    if (!tenantId || !ownerUserId || ownerByTenant.has(tenantId)) {
+      continue;
+    }
+    ownerByTenant.set(tenantId, ownerUserId);
+  }
+
+  const ownerUserIds = Array.from(new Set(ownerByTenant.values()));
+  const subscriptionByOwner = new Map<string, SubscriptionSummary>();
+
+  if (ownerUserIds.length > 0) {
+    const { data: subscriptionRows, error: subscriptionsError } = await supabaseAdmin
+      .from("platform_subscriptions")
+      .select("*")
+      .in("user_id", ownerUserIds);
+
+    if (subscriptionsError) {
+      throwPlatformSchemaMissingError(`Failed to load tenant subscriptions: ${subscriptionsError.message}`);
+    }
+
+    for (const row of (subscriptionRows ?? []) as SubscriptionRow[]) {
+      const ownerUserId = row.user_id?.trim();
+      if (!ownerUserId) {
+        continue;
+      }
+      subscriptionByOwner.set(ownerUserId, toSubscriptionSummary(row));
+    }
+  }
+
   const verificationByTenant = new Map<string, DomainVerificationRow>();
   for (const row of (verifications ?? []) as DomainVerificationRow[]) {
     verificationByTenant.set(row.tenant_id, row);
@@ -2022,6 +2069,7 @@ export async function listUserTenants(userId: string): Promise<TenantSummary[]> 
     name: tenant.name,
     allowed_domains: tenant.allowed_domains,
     workspace_role: roleMap.get(tenant.tenant_id) ?? null,
+    subscription: subscriptionByOwner.get(ownerByTenant.get(tenant.tenant_id) ?? "") ?? null,
     business_profile: normalizeBusinessProfile(
       {
         business_type: tenant.business_type || undefined,
