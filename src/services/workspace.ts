@@ -239,7 +239,9 @@ export async function listWorkspaceMembers(input: {
   }
 
   const members = await listWorkspaceMembersWithUser(input.workspaceId);
-  return members.map(mapMember);
+  return members
+    .filter((member) => member.is_active)
+    .map(mapMember);
 }
 
 export async function listWorkspaceInvitationsForActor(input: {
@@ -402,9 +404,14 @@ export async function removeWorkspaceMember(input: {
     throw new HttpError(409, "Owners cannot remove themselves from the workspace");
   }
 
-  const targetMember = await getWorkspaceMemberByUser(input.workspaceId, input.targetUserId);
-  if (!targetMember || !targetMember.is_active) {
+  const targetMember = (await listWorkspaceMembersWithUser(input.workspaceId)).find(
+    (member) => member.user_id === input.targetUserId
+  );
+  if (!targetMember) {
     throw new HttpError(404, "Target workspace member was not found");
+  }
+  if (!targetMember.is_active) {
+    throw new HttpError(409, "This member is already removed");
   }
   if (targetMember.role === "owner") {
     throw new HttpError(409, "Owner members cannot be removed from this endpoint");
