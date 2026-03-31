@@ -3,9 +3,9 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { acceptConversation, getModeTransitionMessage } from "@/services/conversation";
-import { isUserMemberOfQueue, touchQueueMemberLastAssigned } from "@/agent/repository";
+import { touchQueueMemberLastAssigned } from "@/agent/repository";
 import {
   broadcastAgentNotification,
   broadcastModeChange,
@@ -39,20 +39,13 @@ export async function POST(
     }
 
     const workspaceId = chat.workspace_id ?? chat.tenant_id;
-    const { user, role } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId,
       permission: "conversation:accept"
     });
 
     await enforceAgentApiRateLimit(`agent_accept:${getClientIp(request)}:${workspaceId}:${user.id}`);
-
-    if (chat.queue_id && role === "agent") {
-      const isQueueMember = await isUserMemberOfQueue(chat.queue_id, user.id);
-      if (!isQueueMember) {
-        throw new HttpError(403, "You are not a member of this queue");
-      }
-    }
 
     // Transition to agent_active
     const updated = await acceptConversation(chatId, user.id);

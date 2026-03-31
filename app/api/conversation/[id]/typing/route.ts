@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { assertChatOwnership } from "@/chat/repository";
+import { assertChatOwnership, markVisitorTypingActivity } from "@/chat/repository";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
-import { broadcastTypingIndicator } from "@/services/notification";
+import { broadcastTypingIndicator, broadcastWorkspaceInboxUpdate } from "@/services/notification";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,10 +57,20 @@ export async function POST(
       is_typing: parsed.data.is_typing
     });
 
+    if (parsed.data.is_typing) {
+      await markVisitorTypingActivity(chatId).catch(() => undefined);
+      await broadcastWorkspaceInboxUpdate(chat.workspace_id ?? chat.tenant_id, {
+        chat_id: chatId,
+        tenant_id: chat.tenant_id,
+        queue_id: chat.queue_id ?? null,
+        mode: chat.conversation_mode,
+        reason: "visitor_typing_activity"
+      }).catch(() => undefined);
+    }
+
     return jsonCorsResponse(request, { ok: true });
   } catch (error) {
     const asHttpError = toHttpError(error);
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
   }
 }
-

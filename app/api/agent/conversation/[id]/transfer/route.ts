@@ -5,10 +5,9 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import {
   getWorkspaceMemberByUser,
-  isUserMemberOfQueue,
   touchQueueMemberLastAssigned
 } from "@/agent/repository";
 import {
@@ -70,17 +69,13 @@ export async function POST(
     }
 
     const workspaceId = chat.workspace_id ?? chat.tenant_id;
-    const { user, role } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId,
       permission: "conversation:transfer"
     });
 
     await enforceAgentApiRateLimit(`agent_transfer:${getClientIp(request)}:${workspaceId}:${user.id}`);
-
-    if (role === "agent" && chat.assigned_agent_id !== user.id) {
-      throw new HttpError(403, "Agents can only transfer conversations assigned to them");
-    }
 
     if (parsed.data.target_agent_user_id) {
       const targetMember = await getWorkspaceMemberByUser(workspaceId, parsed.data.target_agent_user_id);
@@ -89,15 +84,6 @@ export async function POST(
       }
       if (targetMember.role === "viewer") {
         throw new HttpError(409, "Target member cannot receive conversations");
-      }
-      if (parsed.data.target_queue_id) {
-        const isInQueue = await isUserMemberOfQueue(
-          parsed.data.target_queue_id,
-          parsed.data.target_agent_user_id
-        );
-        if (!isInQueue) {
-          throw new HttpError(409, "Target agent is not a member of the selected queue");
-        }
       }
 
       const updated = await transferConversationToAgent({

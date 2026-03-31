@@ -3,9 +3,9 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { getChatById, insertChatMessage, touchChatThread } from "@/chat/repository";
-import { broadcastMessage } from "@/services/notification";
+import { broadcastMessage, broadcastWorkspaceInboxUpdate } from "@/services/notification";
 import { writeAuditLog } from "@/services/audit";
 import { recordFirstAgentResponse } from "@/services/sla";
 import { z } from "zod";
@@ -46,14 +46,14 @@ export async function POST(
       );
     }
 
-    // Verify the agent is assigned to this conversation
+    // Verify the conversation exists and user can reply from shared inbox
     const chat = await getChatById(chatId);
     if (!chat) {
       throw new HttpError(404, "Conversation not found");
     }
 
     const workspaceId = chat.workspace_id ?? chat.tenant_id;
-    const { user } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId,
       permission: "conversation:reply"
@@ -66,10 +66,6 @@ export async function POST(
         409,
         `Cannot reply in mode '${chat.conversation_mode}'. Conversation must be in agent_active or copilot mode.`
       );
-    }
-
-    if (chat.assigned_agent_id !== user.id) {
-      throw new HttpError(403, "You are not assigned to this conversation");
     }
 
     // Insert agent message
@@ -99,6 +95,13 @@ export async function POST(
     // Broadcast to realtime subscribers (skip internal notes for widget)
     if (!parsed.data.is_internal) {
       await broadcastMessage(chatId, message);
+      await broadcastWorkspaceInboxUpdate(workspaceId, {
+        chat_id: chatId,
+        tenant_id: chat.tenant_id,
+        queue_id: chat.queue_id ?? null,
+        mode: chat.conversation_mode,
+        reason: "agent_reply"
+      }).catch(() => undefined);
     }
     await writeAuditLog({
       workspaceId,

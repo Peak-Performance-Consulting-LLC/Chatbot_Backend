@@ -191,20 +191,11 @@ export async function acceptConversation(
     throw new HttpError(409, `Cannot accept conversation in mode '${from}'`);
   }
 
-  // Check if already assigned to another agent
-  if (chat.assigned_agent_id && chat.assigned_agent_id !== agentUserId) {
-    throw new HttpError(409, "Conversation is already assigned to another agent");
-  }
-
   const updated = await acceptConversationWithOptimisticLock(chatId, agentUserId);
   if (!updated) {
     const latest = await getChatById(chatId);
     if (!latest) {
       throw new HttpError(404, "Conversation not found");
-    }
-
-    if (latest.assigned_agent_id && latest.assigned_agent_id !== agentUserId) {
-      throw new HttpError(409, "Conversation is already assigned to another agent");
     }
 
     throw new HttpError(
@@ -248,10 +239,6 @@ export async function returnToAI(
   }
 
   const from = chat.conversation_mode ?? "ai_only";
-  // Only the assigned agent can return the conversation
-  if (chat.assigned_agent_id && chat.assigned_agent_id !== agentUserId) {
-    throw new HttpError(403, "Only the assigned agent can return this conversation to AI");
-  }
 
   const updated = await transitionMode({
     chatId,
@@ -321,10 +308,6 @@ export async function setCopilotMode(input: {
   const chat = await getChatById(input.chatId);
   if (!chat) {
     throw new HttpError(404, "Conversation not found");
-  }
-
-  if (chat.assigned_agent_id !== input.agentUserId) {
-    throw new HttpError(403, "Only the assigned agent can toggle copilot mode");
   }
 
   const targetMode: ConversationMode = input.enabled ? "copilot" : "agent_active";

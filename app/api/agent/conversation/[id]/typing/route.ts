@@ -3,7 +3,7 @@ import { getChatById } from "@/chat/repository";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { broadcastTypingIndicator } from "@/services/notification";
 
 export const runtime = "nodejs";
@@ -44,15 +44,11 @@ export async function POST(
       throw new HttpError(404, "Conversation not found");
     }
 
-    const { user } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId: chat.workspace_id ?? chat.tenant_id,
       permission: "conversation:reply"
     });
-
-    if (chat.assigned_agent_id !== user.id) {
-      throw new HttpError(403, "Only the assigned agent can publish typing state");
-    }
 
     if (chat.conversation_mode !== "agent_active" && chat.conversation_mode !== "copilot") {
       throw new HttpError(409, "Typing indicators are only supported in active agent mode");

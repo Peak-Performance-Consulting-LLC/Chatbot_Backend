@@ -58,6 +58,51 @@ function isCompleteVisitorContact(contact: {
   return Boolean(contact.full_name?.trim() && contact.email?.trim() && contact.phone_raw?.trim());
 }
 
+function formatWaitingEtaLabel(seconds: number | null): string | null {
+  if (seconds === null) {
+    return null;
+  }
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  if (safeSeconds < 60) {
+    return "less than a minute";
+  }
+  const minutes = Math.ceil(safeSeconds / 60);
+  if (minutes < 60) {
+    return minutes === 1 ? "about 1 minute" : `about ${minutes} minutes`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (remainingMinutes === 0) {
+    return hours === 1 ? "about 1 hour" : `about ${hours} hours`;
+  }
+  const hourPart = hours === 1 ? "1 hour" : `${hours} hours`;
+  return `about ${hourPart} ${remainingMinutes} minutes`;
+}
+
+function computeWaitingEta(dueAt: string | null | undefined): {
+  waitingEtaSeconds: number | null;
+  waitingEtaLabel: string | null;
+} {
+  if (!dueAt) {
+    return {
+      waitingEtaSeconds: null,
+      waitingEtaLabel: null
+    };
+  }
+  const dueTs = new Date(dueAt).getTime();
+  if (!Number.isFinite(dueTs)) {
+    return {
+      waitingEtaSeconds: null,
+      waitingEtaLabel: null
+    };
+  }
+  const remainingSeconds = Math.max(0, Math.ceil((dueTs - Date.now()) / 1000));
+  return {
+    waitingEtaSeconds: remainingSeconds,
+    waitingEtaLabel: formatWaitingEtaLabel(remainingSeconds)
+  };
+}
+
 /**
  * POST /api/conversation/[id]/handoff
  * Visitor requests handoff to a live agent.
@@ -241,6 +286,9 @@ export async function POST(
 
     const now = new Date();
     const slaTargets = buildSlaTargetsForQueue(targetQueue, now);
+    let allAgentsBusy = false;
+    let waitingEtaSeconds: number | null = null;
+    let waitingEtaLabel: string | null = null;
 
     // Transition to handoff_pending
     const updated = await requestHandoffWithOptions(chatId, {
@@ -302,7 +350,10 @@ export async function POST(
       tenant_id: parsed.data.tenant_id,
       queue_id: targetQueue.id,
       mode: "handoff_pending",
-      reason: "handoff_requested"
+      reason: "chat_waiting_started",
+      awaiting_agent_reply: true,
+      waiting_age_seconds: 0,
+      waiting_urgency: "normal"
     });
 
     // Auto-assign routing path
@@ -353,7 +404,10 @@ export async function POST(
           tenant_id: parsed.data.tenant_id,
           queue_id: targetQueue.id,
           mode: "agent_active",
-          reason: "conversation_assigned"
+          reason: "conversation_assigned",
+          awaiting_agent_reply: false,
+          waiting_age_seconds: null,
+          waiting_urgency: null
         });
         await writeAuditLog({
           workspaceId,
@@ -374,18 +428,30 @@ export async function POST(
           status: assigned.conversation_status,
           queue_id: targetQueue.id,
           assigned_agent_id: assigned.assigned_agent_id,
-          sla_first_response_due_at: assigned.sla_first_response_due_at
+          sla_first_response_due_at: assigned.sla_first_response_due_at,
+          all_agents_busy: false,
+          waiting_eta_seconds: null,
+          waiting_eta_label: null
         });
       }
+
+      allAgentsBusy = true;
+      const eta = computeWaitingEta(updated.sla_first_response_due_at);
+      waitingEtaSeconds = eta.waitingEtaSeconds;
+      waitingEtaLabel = eta.waitingEtaLabel;
 
       const busyMessage = await insertChatMessage({
         chat_id: chatId,
         role: "system",
-        content: "All agents are currently busy. We will connect you shortly.",
+        content: waitingEtaLabel
+          ? `All agents are currently busy. Estimated wait: ${waitingEtaLabel}.`
+          : "All agents are currently busy. We will connect you shortly.",
         sender_type: "system",
         metadata: {
           queue_id: targetQueue.id,
-          reason: "no_available_agents"
+          reason: "no_available_agents",
+          waiting_eta_seconds: waitingEtaSeconds,
+          waiting_eta_label: waitingEtaLabel
         }
       });
       await broadcastMessage(chatId, busyMessage);
@@ -403,7 +469,10 @@ export async function POST(
       tenant_id: parsed.data.tenant_id,
       queue_id: targetQueue.id,
       mode: "handoff_pending",
-      reason: "conversation_queued"
+      reason: "conversation_queued",
+      awaiting_agent_reply: true,
+      waiting_age_seconds: 0,
+      waiting_urgency: "normal"
     });
     await writeAuditLog({
       workspaceId,
@@ -422,7 +491,10 @@ export async function POST(
       mode: updated.conversation_mode,
       status: updated.conversation_status,
       queue_id: targetQueue.id,
-      sla_first_response_due_at: updated.sla_first_response_due_at
+      sla_first_response_due_at: updated.sla_first_response_due_at,
+      all_agents_busy: allAgentsBusy,
+      waiting_eta_seconds: waitingEtaSeconds,
+      waiting_eta_label: waitingEtaLabel
     });
   } catch (error) {
     const asHttpError = toHttpError(error);

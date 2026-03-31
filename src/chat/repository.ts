@@ -7,6 +7,7 @@ import type {
   ConversationEvent,
   ConversationMode,
   ConversationStatus,
+  ExternalSenderType,
   MessageMetadata,
   SenderType
 } from "@/chat/types";
@@ -45,6 +46,26 @@ function normalizePhoneNumber(input: string): string {
     return "";
   }
   return trimmed.startsWith("+") ? `+${digits}` : digits;
+}
+
+function isMissingResponseStateColumnError(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  if (!error) {
+    return false;
+  }
+  const message = (error.message ?? "").toLowerCase();
+  const referencesResponseStateColumns =
+    message.includes("awaiting_agent_reply") ||
+    message.includes("last_external_sender_type") ||
+    message.includes("last_external_message_at") ||
+    message.includes("last_visitor_message_at") ||
+    message.includes("last_visitor_typing_at") ||
+    message.includes("last_visitor_activity_at");
+
+  if (!referencesResponseStateColumns) {
+    return false;
+  }
+
+  return error.code === "42703" || message.includes("does not exist");
 }
 
 export async function createChatThread(input: {
@@ -136,6 +157,10 @@ export async function insertChatMessage(input: {
     }
   }
 
+  const senderType =
+    input.sender_type ??
+    (input.role === "user" ? "visitor" : input.role === "assistant" ? "ai" : "system");
+
   const { data, error } = await supabaseAdmin
     .from("messages")
     .insert({
@@ -143,7 +168,7 @@ export async function insertChatMessage(input: {
       role: input.role,
       content: input.content,
       metadata: input.metadata ?? {},
-      sender_type: input.sender_type ?? (input.role === "user" ? "visitor" : input.role === "assistant" ? "ai" : "system"),
+      sender_type: senderType,
       sender_id: input.sender_id ?? null,
       is_internal: input.is_internal ?? false,
       is_draft: input.is_draft ?? false,
@@ -154,6 +179,38 @@ export async function insertChatMessage(input: {
 
   if (error || !data) {
     throw new HttpError(500, `Failed to save chat message: ${error?.message ?? "Unknown error"}`);
+  }
+
+  if (!input.is_internal && (senderType === "visitor" || senderType === "agent")) {
+    const externalSenderType = senderType as ExternalSenderType;
+    const nowIso = new Date().toISOString();
+    const chatUpdatePayload: {
+      awaiting_agent_reply: boolean;
+      last_external_sender_type: ExternalSenderType;
+      last_external_message_at: string;
+      last_visitor_message_at?: string;
+      last_visitor_activity_at?: string;
+      updated_at: string;
+    } = {
+      awaiting_agent_reply: externalSenderType === "visitor",
+      last_external_sender_type: externalSenderType,
+      last_external_message_at: data.created_at,
+      updated_at: nowIso
+    };
+
+    if (externalSenderType === "visitor") {
+      chatUpdatePayload.last_visitor_message_at = data.created_at;
+      chatUpdatePayload.last_visitor_activity_at = data.created_at;
+    }
+
+    const { error: chatUpdateError } = await supabaseAdmin
+      .from("chats")
+      .update(chatUpdatePayload)
+      .eq("id", input.chat_id);
+
+    if (chatUpdateError && !isMissingResponseStateColumnError(chatUpdateError)) {
+      throw new HttpError(500, `Failed to update chat response state: ${chatUpdateError.message}`);
+    }
   }
 
   return data as ChatMessage;
@@ -378,6 +435,12 @@ export async function updateChatMode(
     overflowed_at?: string | null;
     visitor_is_vip?: boolean;
     routing_skill?: string | null;
+    awaiting_agent_reply?: boolean;
+    last_external_sender_type?: ExternalSenderType | null;
+    last_external_message_at?: string | null;
+    last_visitor_message_at?: string | null;
+    last_visitor_typing_at?: string | null;
+    last_visitor_activity_at?: string | null;
     archived_at?: string | null;
   }
 ): Promise<ChatThread> {
@@ -417,6 +480,12 @@ export async function updateChatFields(
     overflowed_at?: string | null;
     visitor_is_vip?: boolean;
     routing_skill?: string | null;
+    awaiting_agent_reply?: boolean;
+    last_external_sender_type?: ExternalSenderType | null;
+    last_external_message_at?: string | null;
+    last_visitor_message_at?: string | null;
+    last_visitor_typing_at?: string | null;
+    last_visitor_activity_at?: string | null;
     archived_at?: string | null;
   }
 ): Promise<ChatThread> {
@@ -435,6 +504,21 @@ export async function updateChatFields(
   }
 
   return data as ChatThread;
+}
+
+export async function markVisitorTypingActivity(chatId: string, timestamp = new Date().toISOString()): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("chats")
+    .update({
+      last_visitor_typing_at: timestamp,
+      last_visitor_activity_at: timestamp,
+      updated_at: timestamp
+    })
+    .eq("id", chatId);
+
+  if (error && !isMissingResponseStateColumnError(error)) {
+    throw new HttpError(500, `Failed to update visitor activity: ${error.message}`);
+  }
 }
 
 export async function listAgentConversations(
@@ -478,7 +562,6 @@ export async function acceptConversationWithOptimisticLock(
     })
     .eq("id", chatId)
     .eq("conversation_mode", "handoff_pending")
-    .or(`assigned_agent_id.is.null,assigned_agent_id.eq.${agentUserId}`)
     .select("*")
     .maybeSingle();
 

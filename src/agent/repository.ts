@@ -1,9 +1,10 @@
 import { HttpError } from "@/lib/httpError";
 import { supabaseAdmin } from "@/lib/supabase";
-import type { ChatThread, ConversationMode } from "@/chat/types";
+import type { ChatThread, ConversationMode, VisitorState, WaitingUrgency } from "@/chat/types";
 
 export type WorkspaceMemberRole = "owner" | "admin" | "supervisor" | "agent" | "viewer";
 export type AgentPresenceStatus = "online" | "away" | "offline";
+export type AgentEffectiveStatus = "online" | "busy" | "away" | "offline";
 export type QueueRoutingMode = "manual_accept" | "auto_assign";
 export type QueueAfterHoursAction = "collect_info" | "overflow" | "ai_only";
 export type QueueRoutingStrategy = "priority_least_active" | "round_robin";
@@ -67,8 +68,13 @@ type VisitorContactSnapshot = {
 };
 
 export type AgentInboxPayload = {
+  conversations: ChatThread[];
   my_active: ChatThread[];
   queue_unassigned: ChatThread[];
+  waiting_count: number;
+  answered_count: number;
+  high_waiting_count: number;
+  critical_waiting_count: number;
 };
 
 type WorkspaceMemberWithUserRow = WorkspaceMemberRecord & {
@@ -89,6 +95,20 @@ function takeFirst<T>(value: T | T[] | null | undefined): T | null {
     return value[0] ?? null;
   }
   return value ?? null;
+}
+
+const WAITING_WARNING_SECONDS = 2 * 60;
+const WAITING_HIGH_SECONDS = 5 * 60;
+const WAITING_CRITICAL_SECONDS = 15 * 60;
+
+const VISITOR_TYPING_WINDOW_MS = 8_000;
+const VISITOR_ACTIVE_WINDOW_MS = 2 * 60 * 1_000;
+const VISITOR_IDLE_WINDOW_MS = 15 * 60 * 1_000;
+
+function toUnixMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
 }
 
 export async function getWorkspaceMemberByUser(
@@ -466,6 +486,68 @@ export async function countActiveChatsByAgent(userId: string): Promise<number> {
   return count ?? 0;
 }
 
+export async function listActiveChatsByAgent(userIds: string[]): Promise<Map<string, number>> {
+  if (userIds.length === 0) {
+    return new Map();
+  }
+
+  const uniqueUserIds = Array.from(new Set(userIds.filter(Boolean)));
+  if (uniqueUserIds.length === 0) {
+    return new Map();
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("chats")
+    .select("assigned_agent_id")
+    .in("assigned_agent_id", uniqueUserIds)
+    .in("conversation_mode", ["agent_active", "copilot"]);
+
+  if (error) {
+    throw new HttpError(500, `Failed to load active chat counts for agents: ${error.message}`);
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of (data ?? []) as Array<{ assigned_agent_id: string | null }>) {
+    const userId = row.assigned_agent_id?.trim();
+    if (!userId) continue;
+    counts.set(userId, (counts.get(userId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export async function listWorkspaceMemberCapacityLimits(workspaceMemberIds: string[]): Promise<Map<string, number>> {
+  if (workspaceMemberIds.length === 0) {
+    return new Map();
+  }
+
+  const uniqueMemberIds = Array.from(new Set(workspaceMemberIds.filter(Boolean)));
+  if (uniqueMemberIds.length === 0) {
+    return new Map();
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("queue_members")
+    .select("workspace_member_id, max_concurrent_chats")
+    .in("workspace_member_id", uniqueMemberIds)
+    .eq("is_active", true);
+
+  if (error) {
+    throw new HttpError(500, `Failed to load capacity limits: ${error.message}`);
+  }
+
+  const limits = new Map<string, number>();
+  for (const row of (data ?? []) as Array<{ workspace_member_id: string; max_concurrent_chats: number }>) {
+    const memberId = row.workspace_member_id;
+    const current = limits.get(memberId) ?? 0;
+    const next = Number.isFinite(row.max_concurrent_chats) ? Math.max(1, row.max_concurrent_chats) : current;
+    if (next > current) {
+      limits.set(memberId, next);
+    }
+  }
+
+  return limits;
+}
+
 export async function listQueueIdsForUser(workspaceId: string, userId: string): Promise<string[]> {
   const membership = await getWorkspaceMemberByUser(workspaceId, userId);
   if (!membership) {
@@ -537,56 +619,196 @@ export async function updateChatQueue(input: {
   return data as ChatThread;
 }
 
+function isMissingSharedInboxColumnError(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  if (!error) {
+    return false;
+  }
+  const message = (error.message ?? "").toLowerCase();
+  const referencesSharedInboxColumns =
+    message.includes("awaiting_agent_reply") ||
+    message.includes("last_external_sender_type") ||
+    message.includes("last_external_message_at");
+
+  if (!referencesSharedInboxColumns) {
+    return false;
+  }
+
+  return error.code === "42703" || message.includes("does not exist");
+}
+
+function isConversationWaitingForAgent(conversation: ChatThread): boolean {
+  const waitingFlag = (conversation as Partial<ChatThread>).awaiting_agent_reply;
+  if (typeof waitingFlag === "boolean") {
+    return waitingFlag;
+  }
+  return conversation.conversation_mode === "handoff_pending";
+}
+
+function deriveWaitingAgeSeconds(conversation: ChatThread, nowMs: number): number | null {
+  if (!isConversationWaitingForAgent(conversation)) {
+    return null;
+  }
+  const sourceTs =
+    toUnixMs(conversation.last_external_message_at) ??
+    toUnixMs(conversation.last_message_at);
+  if (sourceTs === null) {
+    return null;
+  }
+  return Math.max(0, Math.floor((nowMs - sourceTs) / 1000));
+}
+
+function deriveWaitingUrgency(waitingAgeSeconds: number | null): WaitingUrgency {
+  if (waitingAgeSeconds === null || waitingAgeSeconds < WAITING_WARNING_SECONDS) {
+    return "normal";
+  }
+  if (waitingAgeSeconds < WAITING_HIGH_SECONDS) {
+    return "warning";
+  }
+  if (waitingAgeSeconds < WAITING_CRITICAL_SECONDS) {
+    return "high";
+  }
+  return "critical";
+}
+
+function waitingUrgencyRank(urgency: WaitingUrgency | null | undefined): number {
+  switch (urgency) {
+    case "critical":
+      return 3;
+    case "high":
+      return 2;
+    case "warning":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function deriveVisitorState(conversation: ChatThread, nowMs: number): VisitorState {
+  const typingTs = toUnixMs(conversation.last_visitor_typing_at);
+  if (typingTs !== null && nowMs - typingTs <= VISITOR_TYPING_WINDOW_MS) {
+    return "typing";
+  }
+
+  const activityTs =
+    toUnixMs(conversation.last_visitor_activity_at) ??
+    toUnixMs(conversation.last_visitor_message_at);
+  if (activityTs === null) {
+    return "away";
+  }
+
+  const delta = nowMs - activityTs;
+  if (delta <= VISITOR_ACTIVE_WINDOW_MS) {
+    return "active";
+  }
+  if (delta <= VISITOR_IDLE_WINDOW_MS) {
+    return "idle";
+  }
+  return "away";
+}
+
+function conversationPriorityTs(conversation: ChatThread): number {
+  return (
+    toUnixMs(conversation.last_external_message_at) ??
+    toUnixMs(conversation.last_message_at) ??
+    0
+  );
+}
+
 export async function listAgentInboxConversations(input: {
   user_id: string;
   workspace_ids: string[];
-  queue_ids: string[];
 }): Promise<AgentInboxPayload> {
   if (input.workspace_ids.length === 0) {
-    return { my_active: [], queue_unassigned: [] };
+    return {
+      conversations: [],
+      my_active: [],
+      queue_unassigned: [],
+      waiting_count: 0,
+      answered_count: 0,
+      high_waiting_count: 0,
+      critical_waiting_count: 0
+    };
   }
 
-  const { data: myActive, error: myActiveError } = await supabaseAdmin
+  let { data, error } = await supabaseAdmin
     .from("chats")
     .select("*")
     .in("workspace_id", input.workspace_ids)
-    .eq("assigned_agent_id", input.user_id)
+    .in("conversation_mode", ["handoff_pending", "agent_active", "copilot"])
     .in("conversation_status", ["active", "waiting", "assigned"])
-    .neq("conversation_mode", "closed")
+    .order("awaiting_agent_reply", { ascending: false })
+    .order("last_external_message_at", { ascending: false, nullsFirst: false })
     .order("last_message_at", { ascending: false })
-    .limit(200);
+    .limit(400);
 
-  if (myActiveError) {
-    throw new HttpError(500, `Failed to load assigned conversations: ${myActiveError.message}`);
-  }
-
-  let queueUnassigned: ChatThread[] = [];
-  if (input.queue_ids.length > 0) {
-    const { data, error } = await supabaseAdmin
+  if (error && isMissingSharedInboxColumnError(error)) {
+    const fallback = await supabaseAdmin
       .from("chats")
       .select("*")
       .in("workspace_id", input.workspace_ids)
-      .eq("conversation_mode", "handoff_pending")
-      .is("assigned_agent_id", null)
-      .in("queue_id", input.queue_ids)
+      .in("conversation_mode", ["handoff_pending", "agent_active", "copilot"])
+      .in("conversation_status", ["active", "waiting", "assigned"])
       .order("last_message_at", { ascending: false })
-      .limit(200);
+      .limit(400);
 
-    if (error) {
-      throw new HttpError(500, `Failed to load queue conversations: ${error.message}`);
-    }
-
-    queueUnassigned = (data ?? []) as ChatThread[];
+    data = fallback.data;
+    error = fallback.error;
   }
 
-  const [myActiveWithContact, queueUnassignedWithContact] = await Promise.all([
-    enrichConversationsWithVisitorContact((myActive ?? []) as ChatThread[]),
-    enrichConversationsWithVisitorContact(queueUnassigned)
-  ]);
+  if (error) {
+    throw new HttpError(500, `Failed to load inbox conversations: ${error.message}`);
+  }
+
+  const nowMs = Date.now();
+  const conversationsWithContact = await enrichConversationsWithVisitorContact((data ?? []) as ChatThread[]);
+  const conversationsWithStatus = conversationsWithContact.map((conversation) => {
+    const waiting = isConversationWaitingForAgent(conversation);
+    const waitingAgeSeconds = deriveWaitingAgeSeconds(conversation, nowMs);
+    const waitingUrgency = waiting ? deriveWaitingUrgency(waitingAgeSeconds) : null;
+    return {
+      ...conversation,
+      visitor_state: deriveVisitorState(conversation, nowMs),
+      waiting_age_seconds: waitingAgeSeconds,
+      waiting_urgency: waitingUrgency
+    } as ChatThread;
+  });
+
+  conversationsWithStatus.sort((left, right) => {
+    const leftWaiting = isConversationWaitingForAgent(left);
+    const rightWaiting = isConversationWaitingForAgent(right);
+    if (leftWaiting !== rightWaiting) {
+      return rightWaiting ? 1 : -1;
+    }
+    if (leftWaiting && rightWaiting) {
+      const urgencyDelta = waitingUrgencyRank(right.waiting_urgency) - waitingUrgencyRank(left.waiting_urgency);
+      if (urgencyDelta !== 0) {
+        return urgencyDelta;
+      }
+    }
+    return conversationPriorityTs(right) - conversationPriorityTs(left);
+  });
+
+  const myActiveWithContact = conversationsWithStatus.filter(
+    (conversation) => conversation.assigned_agent_id === input.user_id
+  );
+  const queueUnassignedWithContact = conversationsWithStatus.filter(
+    (conversation) =>
+      conversation.conversation_mode === "handoff_pending" && conversation.assigned_agent_id === null
+  );
+  const waitingConversations = conversationsWithStatus.filter((conversation) => isConversationWaitingForAgent(conversation));
+  const waitingCount = waitingConversations.length;
+  const answeredCount = Math.max(0, conversationsWithStatus.length - waitingCount);
+  const highWaitingCount = waitingConversations.filter((conversation) => conversation.waiting_urgency === "high").length;
+  const criticalWaitingCount = waitingConversations.filter((conversation) => conversation.waiting_urgency === "critical").length;
 
   return {
+    conversations: conversationsWithStatus,
     my_active: myActiveWithContact,
-    queue_unassigned: queueUnassignedWithContact
+    queue_unassigned: queueUnassignedWithContact,
+    waiting_count: waitingCount,
+    answered_count: answeredCount,
+    high_waiting_count: highWaitingCount,
+    critical_waiting_count: criticalWaitingCount
   };
 }
 

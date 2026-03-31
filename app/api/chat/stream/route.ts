@@ -663,6 +663,9 @@ export async function POST(request: Request) {
       conversationMode === "copilot" ||
       conversationMode === "handoff_pending"
     ) {
+      const wasAwaitingAgentReply =
+        thread.awaiting_agent_reply === true || conversationMode === "handoff_pending";
+
       const visitorMessage = await insertChatMessage({
         chat_id: chatId,
         role: "user",
@@ -685,7 +688,10 @@ export async function POST(request: Request) {
           tenant_id: thread.tenant_id,
           queue_id: thread.queue_id ?? null,
           mode: conversationMode,
-          reason: "visitor_message_live_mode"
+          reason: wasAwaitingAgentReply ? "visitor_message_live_mode" : "chat_waiting_started",
+          awaiting_agent_reply: true,
+          waiting_age_seconds: 0,
+          waiting_urgency: "normal"
         });
       } catch (err) {
         logError("realtime_visitor_message_broadcast_failed", {

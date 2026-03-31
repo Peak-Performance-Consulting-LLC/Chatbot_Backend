@@ -2,7 +2,7 @@ import { z } from "zod";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { getChatById, insertChatMessage } from "@/chat/repository";
 import { generateCopilotDraft } from "@/services/copilot";
 import { getModeTransitionMessage, setCopilotMode } from "@/services/conversation";
@@ -49,15 +49,11 @@ export async function POST(
     }
 
     const workspaceId = chat.workspace_id ?? chat.tenant_id;
-    const { user } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId,
       permission: "conversation:reply"
     });
-
-    if (chat.assigned_agent_id !== user.id) {
-      throw new HttpError(403, "Only the assigned agent can use copilot");
-    }
 
     if (parsed.data.action === "enable" || parsed.data.action === "disable") {
       const enabled = parsed.data.action === "enable";

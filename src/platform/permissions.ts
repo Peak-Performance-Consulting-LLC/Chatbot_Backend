@@ -70,6 +70,12 @@ export function hasWorkspacePermission(role: WorkspaceRole, permission: Workspac
   return PERMISSIONS_BY_ROLE[role]?.has(permission) ?? false;
 }
 
+const WORKSPACE_RESPONDER_ROLES = new Set<WorkspaceRole>(["owner", "agent"]);
+
+export function isWorkspaceResponderRole(role: WorkspaceRole): boolean {
+  return WORKSPACE_RESPONDER_ROLES.has(role);
+}
+
 export async function requireWorkspacePermission(input: {
   token: string;
   workspaceId: string;
@@ -88,6 +94,18 @@ export async function requireWorkspacePermission(input: {
     user,
     role
   };
+}
+
+export async function requireWorkspaceResponderPermission(input: {
+  token: string;
+  workspaceId: string;
+  permission: WorkspacePermission;
+}) {
+  const resolved = await requireWorkspacePermission(input);
+  if (!isWorkspaceResponderRole(resolved.role)) {
+    throw new HttpError(403, "Only owner or agent roles can operate the shared inbox");
+  }
+  return resolved;
 }
 
 function toPlanLabel(plan: string): string {

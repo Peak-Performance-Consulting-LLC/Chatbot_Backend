@@ -1,11 +1,9 @@
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
-import { hasWorkspacePermission } from "@/platform/permissions";
+import { hasWorkspacePermission, isWorkspaceResponderRole } from "@/platform/permissions";
 import { listUserTenantIds, listWorkspaceRolesForUser, resolvePlatformSession } from "@/platform/repository";
-import { listAgentInboxConversations, listQueueIdsForUser, listQueues } from "@/agent/repository";
-
-const WORKSPACE_WIDE_QUEUE_ROLES = new Set(["owner", "admin", "supervisor"]);
+import { listAgentInboxConversations } from "@/agent/repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,7 +14,7 @@ export async function OPTIONS(request: Request) {
 
 /**
  * GET /api/agent/inbox
- * Returns conversations assigned to the current agent + unassigned handoff_pending ones.
+ * Returns shared inbox conversations for owner/agent roles in readable workspaces.
  */
 export async function GET(request: Request) {
   try {
@@ -26,9 +24,20 @@ export async function GET(request: Request) {
       listUserTenantIds(user.id),
       listWorkspaceRolesForUser(user.id)
     ]);
-    const readableWorkspaceIds = workspaceIds.filter((workspaceId) =>
-      hasWorkspacePermission(roleMap.get(workspaceId) ?? "viewer", "conversation:view")
-    );
+    const readableWorkspaceIds = workspaceIds.filter((workspaceId) => {
+      const role = roleMap.get(workspaceId) ?? "viewer";
+      return (
+        hasWorkspacePermission(role, "conversation:view") &&
+        isWorkspaceResponderRole(role)
+      );
+    });
+    if (readableWorkspaceIds.length === 0) {
+      return jsonCorsResponse(
+        request,
+        { error: "Only owner or agent roles can access the shared inbox" },
+        403
+      );
+    }
     const url = new URL(request.url);
     const requestedTenantId = (url.searchParams.get("tenant_id") ?? "").trim();
     const scopedWorkspaceIds = requestedTenantId
@@ -39,29 +48,20 @@ export async function GET(request: Request) {
       return jsonCorsResponse(request, { error: "Workspace access denied" }, 403);
     }
 
-    const queueIdsByWorkspace = await Promise.all(
-      scopedWorkspaceIds.map(async (workspaceId) => {
-        const workspaceRole = roleMap.get(workspaceId) ?? "viewer";
-        if (WORKSPACE_WIDE_QUEUE_ROLES.has(workspaceRole)) {
-          const queues = await listQueues(workspaceId);
-          return queues.filter((queue) => queue.is_active).map((queue) => queue.id);
-        }
-        return listQueueIdsForUser(workspaceId, user.id);
-      })
-    );
-    const queueIds = Array.from(new Set(queueIdsByWorkspace.flat()));
-
     const inbox = await listAgentInboxConversations({
       user_id: user.id,
-      workspace_ids: scopedWorkspaceIds,
-      queue_ids: queueIds
+      workspace_ids: scopedWorkspaceIds
     });
 
     return jsonCorsResponse(request, {
       agent_id: user.id,
-      conversations: [...inbox.my_active, ...inbox.queue_unassigned],
+      conversations: inbox.conversations,
       my_active: inbox.my_active,
-      queue_unassigned: inbox.queue_unassigned
+      queue_unassigned: inbox.queue_unassigned,
+      waiting_count: inbox.waiting_count,
+      answered_count: inbox.answered_count,
+      high_waiting_count: inbox.high_waiting_count,
+      critical_waiting_count: inbox.critical_waiting_count
     });
   } catch (error) {
     const asHttpError = toHttpError(error);

@@ -1,9 +1,8 @@
 import { getChatById, listChatMessages } from "@/chat/repository";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
-import { isUserMemberOfQueue } from "@/agent/repository";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,24 +28,23 @@ export async function GET(
       throw new HttpError(404, "Conversation not found");
     }
 
-    const { user, role } = await requireWorkspacePermission({
+    const { role } = await requireWorkspaceResponderPermission({
       token,
       workspaceId: chat.workspace_id ?? chat.tenant_id,
       permission: "conversation:view"
     });
 
-    if (role === "agent" && chat.assigned_agent_id !== user.id) {
-      const isQueueVisible =
-        chat.conversation_mode === "handoff_pending" &&
-        Boolean(chat.queue_id) &&
-        (await isUserMemberOfQueue(chat.queue_id!, user.id));
-      if (!isQueueVisible) {
-        throw new HttpError(403, "Agents can only view assigned or in-queue conversations");
-      }
-    }
-
     const messages = await listChatMessages(chatId, { includeInternal: role !== "viewer" });
-    return jsonCorsResponse(request, { chat_id: chatId, messages });
+    return jsonCorsResponse(request, {
+      chat_id: chatId,
+      conversation: {
+        id: chat.id,
+        conversation_mode: chat.conversation_mode,
+        conversation_status: chat.conversation_status,
+        closed_at: chat.closed_at
+      },
+      messages
+    });
   } catch (error) {
     const asHttpError = toHttpError(error);
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);

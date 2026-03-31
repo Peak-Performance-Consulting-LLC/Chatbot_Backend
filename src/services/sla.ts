@@ -18,7 +18,8 @@ import {
   broadcastAgentNotification,
   broadcastMessage,
   broadcastModeChange,
-  broadcastQueueConversation
+  broadcastQueueConversation,
+  broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
 
 function toDate(value: string | null | undefined): Date | null {
@@ -54,7 +55,7 @@ async function notifyWorkspaceSupervisors(
 }
 
 async function tryAutoAssignFromQueue(input: {
-  chatId: string;
+  conversation: ChatThread;
   queue: QueueRecord;
   routingSkill?: string | null;
   visitorIsVip?: boolean;
@@ -72,7 +73,7 @@ async function tryAutoAssignFromQueue(input: {
     return false;
   }
 
-  const assigned = await acceptConversation(input.chatId, eligible.userId);
+  const assigned = await acceptConversation(input.conversation.id, eligible.userId);
   await touchQueueMemberLastAssigned({
     queue_id: input.queue.id,
     user_id: eligible.userId
@@ -81,7 +82,7 @@ async function tryAutoAssignFromQueue(input: {
 
   if (joined) {
     const systemMessage = await insertChatMessage({
-      chat_id: input.chatId,
+      chat_id: input.conversation.id,
       role: "system",
       content: joined,
       sender_type: "system",
@@ -92,24 +93,59 @@ async function tryAutoAssignFromQueue(input: {
         agent_avatar_url: eligible.avatarUrl
       }
     });
-    await broadcastMessage(input.chatId, systemMessage);
+    await broadcastMessage(input.conversation.id, systemMessage);
   }
 
   await Promise.all([
-    broadcastModeChange(input.chatId, "agent_active", {
+    broadcastModeChange(input.conversation.id, "agent_active", {
       queue_id: input.queue.id,
       agent_id: eligible.userId,
       agent_name: eligible.fullName,
       agent_avatar_url: eligible.avatarUrl
     }),
     broadcastAgentNotification(eligible.userId, "assignment", {
-      chat_id: input.chatId,
+      chat_id: input.conversation.id,
       mode: assigned.conversation_mode,
       queue_id: input.queue.id
-    })
+    }),
+    broadcastWorkspaceInboxUpdate(
+      input.conversation.workspace_id ?? input.conversation.tenant_id,
+      {
+        chat_id: input.conversation.id,
+        tenant_id: input.conversation.tenant_id,
+        queue_id: input.queue.id,
+        mode: "agent_active",
+        reason: "conversation_assigned",
+        awaiting_agent_reply: false,
+        waiting_age_seconds: null,
+        waiting_urgency: null
+      }
+    )
   ]);
 
   return true;
+}
+
+function shouldTryAutoAssign(conversation: ChatThread): boolean {
+  return (
+    conversation.conversation_mode === "handoff_pending" &&
+    !conversation.assigned_agent_id
+  );
+}
+
+async function tryOpportunisticAutoAssign(input: {
+  conversation: ChatThread;
+  queue: QueueRecord;
+}): Promise<boolean> {
+  if (!shouldTryAutoAssign(input.conversation)) {
+    return false;
+  }
+  return tryAutoAssignFromQueue({
+    conversation: input.conversation,
+    queue: input.queue,
+    routingSkill: input.conversation.routing_skill,
+    visitorIsVip: input.conversation.visitor_is_vip
+  });
 }
 
 export async function recordFirstAgentResponse(chat: ChatThread): Promise<ChatThread> {
@@ -153,6 +189,15 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
       queueCache.set(conversation.queue_id, queue);
     }
     if (!queue || !queue.is_active) {
+      continue;
+    }
+
+    const autoAssignedFromPending = await tryOpportunisticAutoAssign({
+      conversation,
+      queue
+    });
+    if (autoAssignedFromPending) {
+      autoAssigned += 1;
       continue;
     }
 
@@ -288,13 +333,23 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
         tenant_id: conversation.tenant_id,
         mode: "handoff_pending",
         queue_id: overflowQueue.id
+      }),
+      broadcastWorkspaceInboxUpdate(conversation.workspace_id ?? conversation.tenant_id, {
+        chat_id: conversation.id,
+        tenant_id: conversation.tenant_id,
+        queue_id: overflowQueue.id,
+        mode: "handoff_pending",
+        reason: "conversation_queued",
+        awaiting_agent_reply: true,
+        waiting_age_seconds: 0,
+        waiting_urgency: "normal"
       })
     ]);
 
     overflowRerouted += 1;
 
     const autoAssignedFromOverflow = await tryAutoAssignFromQueue({
-      chatId: conversation.id,
+      conversation,
       queue: overflowQueue,
       routingSkill: conversation.routing_skill,
       visitorIsVip: conversation.visitor_is_vip

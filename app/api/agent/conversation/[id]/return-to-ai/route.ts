@@ -3,7 +3,7 @@ import { enforceAgentApiRateLimit } from "@/lib/agentRateLimit";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
-import { requireWorkspacePermission } from "@/platform/permissions";
+import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { returnToAI, getModeTransitionMessage } from "@/services/conversation";
 import {
   broadcastModeChange,
@@ -37,15 +37,12 @@ export async function POST(
     }
 
     const workspaceId = chat.workspace_id ?? chat.tenant_id;
-    const { user, role } = await requireWorkspacePermission({
+    const { user } = await requireWorkspaceResponderPermission({
       token,
       workspaceId,
       permission: "conversation:reply"
     });
     await enforceAgentApiRateLimit(`agent_return_to_ai:${getClientIp(request)}:${workspaceId}:${user.id}`);
-    if (role === "agent" && chat.assigned_agent_id !== user.id) {
-      throw new HttpError(403, "Only the assigned agent can return this conversation to AI");
-    }
 
     // Transition to returned_to_ai
     const updated = await returnToAI(chatId, user.id);

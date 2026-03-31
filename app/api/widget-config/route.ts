@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
+import { getWorkspaceLiveSupportAvailability } from "@/services/presence";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 
 export const runtime = "nodejs";
@@ -33,6 +34,13 @@ export async function GET(request: Request) {
     }
 
     const tenant = await assertTenantDomainAccess(request, parsed.data.tenant_id);
+    const liveSupport = await getWorkspaceLiveSupportAvailability(tenant.tenant_id).catch(() => ({
+      availability: "offline" as const,
+      online_count: 0,
+      busy_count: 0,
+      away_count: 0,
+      updated_at: new Date().toISOString()
+    }));
 
     return jsonCorsResponse(request, {
       tenant_id: tenant.tenant_id,
@@ -63,7 +71,8 @@ export async function GET(request: Request) {
       supportPhone: tenant.support_phone || undefined,
       supportCtaLabel: tenant.support_cta_label,
       headerCtaLabel: tenant.header_cta_label,
-      headerCtaNotice: tenant.header_cta_notice
+      headerCtaNotice: tenant.header_cta_notice,
+      live_support: liveSupport
     });
   } catch (error) {
     const asHttpError = toHttpError(error);
