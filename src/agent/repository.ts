@@ -100,6 +100,7 @@ function takeFirst<T>(value: T | T[] | null | undefined): T | null {
 const WAITING_WARNING_SECONDS = 2 * 60;
 const WAITING_HIGH_SECONDS = 5 * 60;
 const WAITING_CRITICAL_SECONDS = 15 * 60;
+const AI_INBOX_RECENCY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 const VISITOR_TYPING_WINDOW_MS = 8_000;
 const VISITOR_ACTIVE_WINDOW_MS = 2 * 60 * 1_000;
@@ -769,8 +770,8 @@ export async function listAgentInboxConversations(input: {
   let { data, error } = await supabaseAdmin
     .from("chats")
     .select("*")
-    .in("workspace_id", input.workspace_ids)
-    .in("conversation_mode", ["handoff_pending", "agent_active", "copilot"])
+    .in("tenant_id", input.workspace_ids)
+    .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
     .in("conversation_status", ["active", "waiting", "assigned"])
     .order("awaiting_agent_reply", { ascending: false })
     .order("last_external_message_at", { ascending: false, nullsFirst: false })
@@ -781,8 +782,8 @@ export async function listAgentInboxConversations(input: {
     const fallback = await supabaseAdmin
       .from("chats")
       .select("*")
-      .in("workspace_id", input.workspace_ids)
-      .in("conversation_mode", ["handoff_pending", "agent_active", "copilot"])
+      .in("tenant_id", input.workspace_ids)
+      .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
       .in("conversation_status", ["active", "waiting", "assigned"])
       .order("last_message_at", { ascending: false })
       .limit(400);
@@ -809,7 +810,24 @@ export async function listAgentInboxConversations(input: {
     } as ChatThread;
   });
 
-  conversationsWithStatus.sort((left, right) => {
+  const visibleConversations = conversationsWithStatus.filter((conversation) => {
+    if (conversation.conversation_mode !== "ai_only" && conversation.conversation_mode !== "returned_to_ai") {
+      return true;
+    }
+
+    if (!conversation.visitor_contact_captured) {
+      return false;
+    }
+
+    const lastActivityTs = conversationPriorityTs(conversation);
+    if (lastActivityTs <= 0) {
+      return false;
+    }
+
+    return nowMs - lastActivityTs <= AI_INBOX_RECENCY_WINDOW_MS;
+  });
+
+  visibleConversations.sort((left, right) => {
     const leftWaiting = isConversationWaitingForAgent(left);
     const rightWaiting = isConversationWaitingForAgent(right);
     if (leftWaiting !== rightWaiting) {
@@ -824,21 +842,21 @@ export async function listAgentInboxConversations(input: {
     return conversationPriorityTs(right) - conversationPriorityTs(left);
   });
 
-  const myActiveWithContact = conversationsWithStatus.filter(
+  const myActiveWithContact = visibleConversations.filter(
     (conversation) => conversation.assigned_agent_id === input.user_id
   );
-  const queueUnassignedWithContact = conversationsWithStatus.filter(
+  const queueUnassignedWithContact = visibleConversations.filter(
     (conversation) =>
       conversation.conversation_mode === "handoff_pending" && conversation.assigned_agent_id === null
   );
-  const waitingConversations = conversationsWithStatus.filter((conversation) => isConversationWaitingForAgent(conversation));
+  const waitingConversations = visibleConversations.filter((conversation) => isConversationWaitingForAgent(conversation));
   const waitingCount = waitingConversations.length;
-  const answeredCount = Math.max(0, conversationsWithStatus.length - waitingCount);
+  const answeredCount = Math.max(0, visibleConversations.length - waitingCount);
   const highWaitingCount = waitingConversations.filter((conversation) => conversation.waiting_urgency === "high").length;
   const criticalWaitingCount = waitingConversations.filter((conversation) => conversation.waiting_urgency === "critical").length;
 
   return {
-    conversations: conversationsWithStatus,
+    conversations: visibleConversations,
     my_active: myActiveWithContact,
     queue_unassigned: queueUnassignedWithContact,
     waiting_count: waitingCount,
@@ -984,7 +1002,7 @@ async function enrichConversationsWithVisitorContact(
   );
 
   if (tenantIds.length === 0 || deviceIds.length === 0) {
-    return [];
+    return conversations;
   }
 
   const { data, error } = await supabaseAdmin
@@ -999,30 +1017,30 @@ async function enrichConversationsWithVisitorContact(
 
   const contactByTenantDevice = new Map<string, VisitorContactSnapshot>();
   for (const row of (data ?? []) as VisitorContactSnapshot[]) {
-    if (!isCompleteVisitorContact(row)) {
-      continue;
-    }
     contactByTenantDevice.set(toContactKey(row.tenant_id, row.device_id), row);
   }
 
-  return conversations
-    .map((conversation) => {
-      const contact = contactByTenantDevice.get(
-        toContactKey(conversation.tenant_id, conversation.device_id)
-      );
-      if (!contact) {
-        return null;
-      }
+  return conversations.map((conversation) => {
+    const contact = contactByTenantDevice.get(
+      toContactKey(conversation.tenant_id, conversation.device_id)
+    );
+    if (!contact) {
+      return conversation;
+    }
 
-      return {
-        ...conversation,
-        visitor_name: contact.full_name.trim(),
-        visitor_email: contact.email.trim().toLowerCase(),
-        visitor_phone: contact.phone_raw.trim(),
-        visitor_contact_captured: true
-      } as ChatThread;
-    })
-    .filter(Boolean) as ChatThread[];
+    const fullName = contact.full_name?.trim() ?? "";
+    const email = contact.email?.trim().toLowerCase() ?? "";
+    const phone = contact.phone_raw?.trim() ?? "";
+    const hasContact = isCompleteVisitorContact(contact);
+
+    return {
+      ...conversation,
+      visitor_name: fullName || conversation.visitor_name,
+      visitor_email: email || conversation.visitor_email,
+      visitor_phone: phone || conversation.visitor_phone,
+      visitor_contact_captured: hasContact
+    } as ChatThread;
+  });
 }
 
 export async function listWorkspaceSupervisors(workspaceId: string): Promise<Array<{

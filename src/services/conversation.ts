@@ -13,11 +13,11 @@ import type { ChatThread, ConversationMode, ConversationStatus } from "@/chat/ty
 // Defines allowed transitions and validates them before execution.
 
 const ALLOWED_TRANSITIONS: Record<ConversationMode, ConversationMode[]> = {
-  ai_only: ["handoff_pending", "closed"],
+  ai_only: ["handoff_pending", "agent_active", "closed"],
   handoff_pending: ["agent_active", "ai_only", "closed"],
   agent_active: ["copilot", "returned_to_ai", "closed"],
   copilot: ["agent_active", "returned_to_ai", "closed"],
-  returned_to_ai: ["handoff_pending", "ai_only", "closed"],
+  returned_to_ai: ["handoff_pending", "ai_only", "agent_active", "closed"],
   closed: [] // terminal state
 };
 
