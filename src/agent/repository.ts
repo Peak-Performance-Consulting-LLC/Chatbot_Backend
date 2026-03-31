@@ -206,6 +206,42 @@ export async function upsertWorkspaceMember(input: {
   return data as WorkspaceMemberRecord;
 }
 
+export async function deactivateWorkspaceMember(input: {
+  workspace_id: string;
+  user_id: string;
+}): Promise<WorkspaceMemberRecord | null> {
+  const { data, error } = await supabaseAdmin
+    .from("workspace_members")
+    .update({
+      is_active: false
+    })
+    .eq("workspace_id", input.workspace_id)
+    .eq("user_id", input.user_id)
+    .eq("is_active", true)
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    throw new HttpError(500, `Failed to deactivate workspace member: ${error.message}`);
+  }
+
+  return (data as WorkspaceMemberRecord | null) ?? null;
+}
+
+export async function deactivateQueueMembersByWorkspaceMember(workspaceMemberId: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("queue_members")
+    .update({
+      is_active: false
+    })
+    .eq("workspace_member_id", workspaceMemberId)
+    .eq("is_active", true);
+
+  if (error) {
+    throw new HttpError(500, `Failed to deactivate queue memberships: ${error.message}`);
+  }
+}
+
 export async function listQueues(workspaceId: string): Promise<QueueRecord[]> {
   const { data, error } = await supabaseAdmin
     .from("queues")

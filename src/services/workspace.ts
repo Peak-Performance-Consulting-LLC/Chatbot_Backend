@@ -17,6 +17,8 @@ import {
 import { writeAuditLog } from "@/services/audit";
 import {
   createQueue,
+  deactivateQueueMembersByWorkspaceMember,
+  deactivateWorkspaceMember,
   findPlatformUserByEmail,
   getWorkspaceMemberByUser,
   listQueues,
@@ -379,6 +381,60 @@ export async function updateWorkspaceMemberRole(input: {
   const member = members.find((row) => row.user_id === input.targetUserId);
   if (!member) {
     throw new HttpError(500, "Role update succeeded but member could not be loaded");
+  }
+
+  return mapMember(member);
+}
+
+export async function removeWorkspaceMember(input: {
+  workspaceId: string;
+  actorUserId: string;
+  targetUserId: string;
+}) {
+  const actor = await getWorkspaceMemberByUser(input.workspaceId, input.actorUserId);
+  if (!actor) {
+    throw new HttpError(403, "Workspace access denied");
+  }
+  if (actor.role !== "owner") {
+    throw new HttpError(403, "Only workspace owners can remove team members");
+  }
+  if (input.actorUserId === input.targetUserId) {
+    throw new HttpError(409, "Owners cannot remove themselves from the workspace");
+  }
+
+  const targetMember = await getWorkspaceMemberByUser(input.workspaceId, input.targetUserId);
+  if (!targetMember || !targetMember.is_active) {
+    throw new HttpError(404, "Target workspace member was not found");
+  }
+  if (targetMember.role === "owner") {
+    throw new HttpError(409, "Owner members cannot be removed from this endpoint");
+  }
+
+  const deactivated = await deactivateWorkspaceMember({
+    workspace_id: input.workspaceId,
+    user_id: input.targetUserId
+  });
+  if (!deactivated) {
+    throw new HttpError(404, "Target workspace member was not found");
+  }
+  await deactivateQueueMembersByWorkspaceMember(deactivated.id);
+
+  await writeAuditLog({
+    workspaceId: input.workspaceId,
+    actorUserId: input.actorUserId,
+    action: "member.removed",
+    targetType: "workspace_member",
+    targetId: deactivated.id,
+    metadata: {
+      user_id: input.targetUserId,
+      previous_role: targetMember.role
+    }
+  });
+
+  const members = await listWorkspaceMembersWithUser(input.workspaceId);
+  const member = members.find((row) => row.user_id === input.targetUserId);
+  if (!member) {
+    throw new HttpError(500, "Member removed but could not be loaded");
   }
 
   return mapMember(member);

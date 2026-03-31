@@ -7,6 +7,7 @@ import {
   inviteWorkspaceMember,
   listWorkspaceInvitationsForActor,
   listWorkspaceMembers,
+  removeWorkspaceMember,
   updateWorkspaceMemberRole
 } from "@/services/workspace";
 
@@ -23,6 +24,11 @@ const updateRoleSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   user_id: z.string().uuid(),
   role: z.enum(["owner", "admin", "supervisor", "agent", "viewer"])
+});
+
+const removeMemberSchema = z.object({
+  tenant_id: z.string().trim().min(2).max(80),
+  user_id: z.string().uuid()
 });
 
 export async function OPTIONS(request: Request) {
@@ -146,6 +152,50 @@ export async function PATCH(request: Request) {
       tenant_id: parsed.data.tenant_id,
       member
     }, 200);
+  } catch (error) {
+    const asHttpError = toHttpError(error);
+    return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
+  }
+}
+
+/**
+ * DELETE /api/platform/team
+ * Removes (deactivates) a workspace member.
+ */
+export async function DELETE(request: Request) {
+  try {
+    const token = parseBearerToken(request);
+    const raw = await request.json();
+    const parsed = removeMemberSchema.safeParse(raw);
+
+    if (!parsed.success) {
+      return jsonCorsResponse(
+        request,
+        { error: "Invalid request payload", details: parsed.error.flatten() },
+        400
+      );
+    }
+
+    const { user } = await requireWorkspacePermission({
+      token,
+      workspaceId: parsed.data.tenant_id,
+      permission: "team:manage"
+    });
+
+    const member = await removeWorkspaceMember({
+      workspaceId: parsed.data.tenant_id,
+      actorUserId: user.id,
+      targetUserId: parsed.data.user_id
+    });
+
+    return jsonCorsResponse(
+      request,
+      {
+        tenant_id: parsed.data.tenant_id,
+        member
+      },
+      200
+    );
   } catch (error) {
     const asHttpError = toHttpError(error);
     return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
