@@ -5,15 +5,22 @@ import { logError, logInfo } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase";
 
 export type TenantSourceInput =
-  | { source_type: "url"; source_value: string }
-  | { source_type: "sitemap"; source_value: string }
-  | { source_type: "faq" | "doc_text"; source_value: string };
+  | { source_type: "url"; source_value: string; source_id?: string }
+  | { source_type: "sitemap"; source_value: string; source_id?: string }
+  | { source_type: "faq" | "doc_text"; source_value: string; source_id?: string };
+
+type ResolvedSource = TenantSourceInput & {
+  source_host: string | null;
+};
 
 type ParsedDoc = {
   source_url: string | null;
   title: string;
   text: string;
+  source: ResolvedSource;
 };
+
+type ParsedDocumentContent = Omit<ParsedDoc, "source">;
 
 type FetchTextResult = {
   text: string;
@@ -25,6 +32,8 @@ type ChunkJob = {
   chunk_index: number;
   chunk_text: string;
 };
+
+const LEAKED_API_KEY_PHRASE = "api key was reported as leaked";
 
 export type IngestTenantInput = {
   tenant_id: string;
@@ -99,6 +108,13 @@ async function mapWithConcurrency<T, R>(
 
 function normalizeDocumentText(input: string) {
   return input.replace(/\s+/g, " ").trim();
+}
+
+function isLeakedEmbeddingKeyError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message.toLowerCase().includes(LEAKED_API_KEY_PHRASE);
 }
 
 async function fetchText(url: string): Promise<FetchTextResult> {
@@ -473,7 +489,7 @@ async function extractSpaBundleText(pageUrl: string, html: string) {
   return uniqueByValue(fragments).join(" ").trim();
 }
 
-async function parseWebDocument(url: string): Promise<ParsedDoc> {
+async function parseWebDocument(url: string): Promise<ParsedDocumentContent> {
   const { text: rawText, contentType } = await fetchText(url);
   const normalizedContentType = contentType?.toLowerCase() ?? "";
 
@@ -538,6 +554,24 @@ function uniqueByValue(values: string[]): string[] {
   return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean)));
 }
 
+function normalizeHost(value: string): string | null {
+  try {
+    return new URL(value).hostname.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function toResolvedSource(source: TenantSourceInput): ResolvedSource {
+  return {
+    ...source,
+    source_host:
+      source.source_type === "url" || source.source_type === "sitemap"
+        ? normalizeHost(source.source_value)
+        : null
+  };
+}
+
 async function resolveSourcesToDocs(
   sources: TenantSourceInput[],
   maxSitemapUrls: number
@@ -545,17 +579,10 @@ async function resolveSourcesToDocs(
   const docs: ParsedDoc[] = [];
   const errors: string[] = [];
 
-  const directUrls = uniqueByValue(
-    sources
-      .filter((source) => source.source_type === "url")
-      .map((source) => source.source_value)
+  const resolvedSources = sources.map(toResolvedSource);
+  const rawTextSources = resolvedSources.filter(
+    (source) => source.source_type === "faq" || source.source_type === "doc_text"
   );
-  const sitemapUrls = uniqueByValue(
-    sources
-      .filter((source) => source.source_type === "sitemap")
-      .map((source) => source.source_value)
-  );
-  const rawTextSources = sources.filter((source) => source.source_type === "faq" || source.source_type === "doc_text");
 
   for (const source of rawTextSources) {
     const text = normalizeDocumentText(source.source_value);
@@ -566,48 +593,76 @@ async function resolveSourcesToDocs(
     docs.push({
       source_url: null,
       title: source.source_type === "faq" ? "FAQ Import" : "Document Import",
-      text
+      text,
+      source
     });
   }
 
-  const urls = new Set<string>(directUrls);
+  const urlSourceMap = new Map<string, ResolvedSource>();
+  const seenSitemaps = new Set<string>();
 
-  const sitemapResults = await mapWithConcurrency(sitemapUrls, 3, async (sitemap) => {
-    try {
-      return await fetchSitemapUrls(sitemap, maxSitemapUrls);
-    } catch (error) {
-      errors.push(`Sitemap failed (${sitemap}): ${error instanceof Error ? error.message : String(error)}`);
-      logError("platform_ingest_sitemap_failed", {
-        sitemap,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      return [];
+  for (const source of resolvedSources) {
+    if (source.source_type === "url") {
+      const key = source.source_value.trim();
+      if (key && !urlSourceMap.has(key)) {
+        urlSourceMap.set(key, source);
+      }
+      continue;
     }
-  });
 
-  for (const items of sitemapResults) {
-    for (const item of items) {
-      urls.add(item);
+    if (source.source_type === "sitemap") {
+      const sitemap = source.source_value.trim();
+      if (!sitemap || seenSitemaps.has(sitemap)) {
+        continue;
+      }
+      seenSitemaps.add(sitemap);
+
+      try {
+        const sitemapUrls = await fetchSitemapUrls(sitemap, maxSitemapUrls);
+        for (const pageUrl of sitemapUrls) {
+          const key = pageUrl.trim();
+          if (key && !urlSourceMap.has(key)) {
+            urlSourceMap.set(key, source);
+          }
+        }
+      } catch (error) {
+        errors.push(`Sitemap failed (${sitemap}): ${error instanceof Error ? error.message : String(error)}`);
+        logError("platform_ingest_sitemap_failed", {
+          sitemap,
+          source_id: source.source_id ?? null,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   }
 
-  const parsedDocs = await mapWithConcurrency(Array.from(urls), DOCUMENT_FETCH_CONCURRENCY, async (url) => {
+  const parsedDocs = await mapWithConcurrency(
+    Array.from(urlSourceMap.entries()),
+    DOCUMENT_FETCH_CONCURRENCY,
+    async ([url, source]) => {
     try {
       const doc = await parseWebDocument(url);
       if (doc.text.length < 60) {
         return null;
       }
 
-      return doc;
+      return {
+        ...doc,
+        source
+      };
     } catch (error) {
-      errors.push(`URL failed (${url}): ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(
+        `URL failed (${url}): ${error instanceof Error ? error.message : String(error)}`
+      );
       logError("platform_ingest_url_failed", {
         url,
+        source_id: source.source_id ?? null,
         error: error instanceof Error ? error.message : String(error)
       });
       return null;
     }
-  });
+    }
+  );
 
   for (const doc of parsedDocs) {
     if (doc) {
@@ -651,6 +706,7 @@ export async function ingestKnowledgeForTenant(input: IngestTenantInput): Promis
   const seenChunks = new Set<string>();
   let fetchedDocs = 0;
   const chunkJobs: ChunkJob[] = [];
+  let leakedKeyDetected = false;
 
   for (const doc of docs) {
     const chunks = chunkText(doc.text);
@@ -685,8 +741,15 @@ export async function ingestKnowledgeForTenant(input: IngestTenantInput): Promis
   }
 
   const chunkResults = await mapWithConcurrency(chunkJobs, CHUNK_INGEST_CONCURRENCY, async (job) => {
+    if (leakedKeyDetected) {
+      return false;
+    }
+
     try {
       const embedding = await embedDocumentText(job.chunk_text);
+      const sourceHost = job.doc.source_url
+        ? normalizeHost(job.doc.source_url)
+        : job.doc.source.source_host;
       const { error } = await supabaseAdmin.from("knowledge_chunks").insert({
         tenant_id: input.tenant_id,
         source_url: job.doc.source_url,
@@ -695,6 +758,10 @@ export async function ingestKnowledgeForTenant(input: IngestTenantInput): Promis
         embedding,
         metadata: {
           chunk_index: job.chunk_index,
+          source_id: job.doc.source.source_id ?? null,
+          source_type: job.doc.source.source_type,
+          source_value: job.doc.source.source_value,
+          source_host: sourceHost,
           source_title: job.doc.title,
           ingested_at: new Date().toISOString()
         }
@@ -707,6 +774,13 @@ export async function ingestKnowledgeForTenant(input: IngestTenantInput): Promis
 
       return true;
     } catch (error) {
+      if (isLeakedEmbeddingKeyError(error)) {
+        leakedKeyDetected = true;
+        errors.push(
+          "Embedding provider rejected GEMINI_API_KEY because it is flagged as leaked. Rotate the key, update backend environment variables, restart the backend, and rerun ingestion."
+        );
+        return false;
+      }
       errors.push(`Embedding failed (${job.doc.title}): ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
@@ -719,7 +793,7 @@ export async function ingestKnowledgeForTenant(input: IngestTenantInput): Promis
     inserted_chunks: insertedChunks,
     fetched_documents: fetchedDocs,
     skipped_documents: Math.max(0, docs.length - fetchedDocs),
-    errors
+    errors: uniqueByValue(errors)
   };
 
   logInfo("platform_ingest_completed", result);

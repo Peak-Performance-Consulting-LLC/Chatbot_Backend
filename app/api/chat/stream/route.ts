@@ -25,7 +25,7 @@ import { getBaseCorsHeaders, jsonCorsResponse, optionsCorsResponse } from "@/lib
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { logError, logInfo } from "@/lib/logger";
 import { enforceRateLimit } from "@/lib/rateLimit";
-import { getClientIp, getRequestId } from "@/lib/request";
+import { getClientIp, getRequestHost, getRequestId } from "@/lib/request";
 import { createSSEStream, streamTextInChunks } from "@/lib/sse";
 import {
   getTenantSubscriptionUsageSnapshot,
@@ -544,6 +544,17 @@ export async function POST(request: Request) {
     }
 
     const input = parsed.data;
+    const requestSiteHost =
+      request.headers.get("x-tenant-site-host")?.trim() ||
+      getRequestHost(request) ||
+      (() => {
+        try {
+          return input.page_context?.url ? new URL(input.page_context.url).host : null;
+        } catch {
+          return null;
+        }
+      })() ||
+      undefined;
     const ip = getClientIp(request);
     const dedupeKey = input.client_message_id
       ? `visitor:${input.device_id}:${input.client_message_id.trim().toLowerCase()}`
@@ -871,6 +882,7 @@ export async function POST(request: Request) {
               userMessage: input.message,
               callCta,
               requestId,
+              siteHost: requestSiteHost,
               pageContext: input.page_context,
               writeToken: writer.token,
               loadHistory: Boolean(input.chat_id)

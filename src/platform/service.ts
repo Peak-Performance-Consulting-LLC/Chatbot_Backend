@@ -303,9 +303,14 @@ async function runProvisioningIngest(input: {
 
   let result;
   try {
+    const persistedSources = await listTenantSources(input.tenantId);
     result = await ingestKnowledgeForTenant({
       tenant_id: input.tenantId,
-      sources: input.sources,
+      sources: persistedSources.map((source) => ({
+        source_type: source.source_type,
+        source_value: source.source_value,
+        source_id: source.id
+      })),
       replace: true,
       max_sitemap_urls: 40,
       max_chunks: 700
@@ -2029,7 +2034,8 @@ export async function runTenantIngestion(input: {
       tenant_id: input.tenant_id,
       sources: sources.map((source) => ({
         source_type: source.source_type,
-        source_value: source.source_value
+        source_value: source.source_value,
+        source_id: source.id
       })),
       replace: Boolean(input.replace),
       max_sitemap_urls: 40,

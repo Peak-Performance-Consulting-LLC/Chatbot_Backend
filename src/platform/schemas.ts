@@ -68,7 +68,7 @@ export const platformVerifyDomainSchema = z.object({
 
 export const platformIngestSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
-  replace: z.boolean().optional().default(false)
+  replace: z.boolean().optional().default(true)
 });
 
 export const platformTenantParamSchema = z.object({

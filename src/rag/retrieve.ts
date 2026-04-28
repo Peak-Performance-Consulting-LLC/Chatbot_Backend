@@ -7,6 +7,7 @@ type MatchRow = {
   chunk_text: string;
   source_url: string | null;
   title?: string | null;
+  metadata?: Record<string, unknown> | null;
   similarity: number;
 };
 
@@ -41,6 +42,7 @@ function normalizeQuery(input: string) {
 function buildRetrievalCacheKey(input: {
   tenantId: string;
   query: string;
+  siteHost?: string;
   matchCount?: number;
   maxChunks?: number;
   maxContextChars?: number;
@@ -49,11 +51,42 @@ function buildRetrievalCacheKey(input: {
   return [
     input.tenantId,
     normalizeQuery(input.query),
+    input.siteHost?.trim().toLowerCase() ?? "",
     input.matchCount ?? 7,
     input.maxChunks ?? 4,
     input.maxContextChars ?? 2800,
     input.minSimilarity ?? 0
   ].join("::");
+}
+
+function normalizeHost(input: string): string | null {
+  const value = input.trim();
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = value.includes("://") ? new URL(value) : new URL(`https://${value}`);
+    return parsed.hostname.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function getChunkSourceHost(chunk: MatchRow): string | null {
+  const metadataHost =
+    chunk.metadata && typeof chunk.metadata === "object"
+      ? (chunk.metadata as Record<string, unknown>).source_host
+      : null;
+  if (typeof metadataHost === "string") {
+    return normalizeHost(metadataHost);
+  }
+
+  if (chunk.source_url) {
+    return normalizeHost(chunk.source_url);
+  }
+
+  return null;
 }
 
 function pruneExpiredEntries() {
@@ -106,6 +139,7 @@ function scoreChunk(chunk: MatchRow, queryTerms: string[]) {
 export async function retrieveKnowledge(input: {
   tenantId: string;
   query: string;
+  siteHost?: string;
   matchCount?: number;
   maxChunks?: number;
   maxContextChars?: number;
@@ -140,11 +174,22 @@ export async function retrieveKnowledge(input: {
   }
 
   const chunks = (data ?? []) as MatchRow[];
+  const requestedHost = normalizeHost(input.siteHost ?? "");
+  const scopedChunks =
+    requestedHost === null
+      ? chunks
+      : chunks.filter((chunk) => {
+          const host = getChunkSourceHost(chunk);
+          // Keep hostless chunks (manual FAQ/doc_text) shared for this tenant.
+          return host === null || host === requestedHost;
+        });
   const maxChunks = input.maxChunks ?? 4;
   const maxContextChars = input.maxContextChars ?? 2800;
   const minSimilarity = input.minSimilarity ?? 0;
   const queryTerms = extractQueryTerms(input.query);
-  const rankedChunks = [...chunks].sort((left, right) => scoreChunk(right, queryTerms) - scoreChunk(left, queryTerms));
+  const rankedChunks = [...scopedChunks].sort(
+    (left, right) => scoreChunk(right, queryTerms) - scoreChunk(left, queryTerms)
+  );
 
   const selected: MatchRow[] = [];
   let usedChars = 0;

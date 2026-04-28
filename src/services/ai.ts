@@ -171,6 +171,7 @@ export async function streamAIResponse(input: {
   userMessage: string;
   callCta: CallCta;
   requestId: string;
+  siteHost?: string;
   writeToken: (token: string) => void;
   pageContext?: { url?: string; title?: string; content?: string };
   loadHistory: boolean;
@@ -199,6 +200,7 @@ export async function streamAIResponse(input: {
         retrieveKnowledge({
           tenantId: input.tenantId,
           query: input.userMessage,
+          siteHost: input.siteHost,
           matchCount: KNOWLEDGE_MATCH_COUNT,
           maxChunks: KNOWLEDGE_MAX_CHUNKS,
           maxContextChars: KNOWLEDGE_MAX_CONTEXT_CHARS,
