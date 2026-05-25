@@ -50,7 +50,11 @@ export async function POST(
       permission: "conversation:reply"
     });
 
-    if (chat.conversation_mode !== "agent_active" && chat.conversation_mode !== "copilot") {
+    if (
+      chat.conversation_mode !== "handoff_pending" &&
+      chat.conversation_mode !== "agent_active" &&
+      chat.conversation_mode !== "copilot"
+    ) {
       throw new HttpError(409, "Typing indicators are only supported in active agent mode");
     }
 

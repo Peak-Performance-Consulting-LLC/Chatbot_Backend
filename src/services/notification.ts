@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase";
 import { logError, logInfo } from "@/lib/logger";
 import { canBroadcastRealtimeEvent } from "@/lib/realtimeRateLimit";
+import { publishRealtimeEvent } from "@/services/realtimeHub";
 import type { ChatMessage, ConversationMode } from "@/chat/types";
 
 /**
@@ -86,6 +87,8 @@ async function broadcastToChannel(
     });
     return;
   }
+
+  publishRealtimeEvent(channelName, event, payload);
 
   const channel = supabaseAdmin.channel(channelName);
   try {
