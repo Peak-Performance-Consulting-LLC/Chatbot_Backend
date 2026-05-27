@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { getChatById } from "@/chat/repository";
+import { getChatById, markAgentTypingActivity } from "@/chat/repository";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
@@ -58,10 +58,15 @@ export async function POST(
       throw new HttpError(409, "Typing indicators are only supported in active agent mode");
     }
 
+    await markAgentTypingActivity(chatId, parsed.data.is_typing).catch(() => undefined);
+
     await broadcastTypingIndicator(chatId, {
       chat_id: chatId,
+      conversationId: chatId,
       actor: "agent",
       user_id: user.id,
+      userId: user.id,
+      userName: user.full_name,
       is_typing: parsed.data.is_typing
     });
 

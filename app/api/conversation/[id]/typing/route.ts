@@ -52,8 +52,11 @@ export async function POST(
 
     await broadcastTypingIndicator(chatId, {
       chat_id: chatId,
+      conversationId: chatId,
       actor: "visitor",
       user_id: parsed.data.device_id,
+      userId: parsed.data.device_id,
+      userName: "Visitor",
       is_typing: parsed.data.is_typing
     });
 

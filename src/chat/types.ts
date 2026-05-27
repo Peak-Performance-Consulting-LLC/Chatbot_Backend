@@ -126,6 +126,7 @@ export type ChatThread = {
   last_external_message_at: string | null;
   last_visitor_message_at?: string | null;
   last_visitor_typing_at?: string | null;
+  last_agent_typing_at?: string | null;
   last_visitor_activity_at?: string | null;
   visitor_state?: VisitorState;
   waiting_urgency?: WaitingUrgency | null;

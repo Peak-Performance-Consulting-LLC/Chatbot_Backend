@@ -59,6 +59,7 @@ function isMissingResponseStateColumnError(error: { code?: string | null; messag
     message.includes("last_external_message_at") ||
     message.includes("last_visitor_message_at") ||
     message.includes("last_visitor_typing_at") ||
+    message.includes("last_agent_typing_at") ||
     message.includes("last_visitor_activity_at");
 
   if (!referencesResponseStateColumns) {
@@ -440,6 +441,7 @@ export async function updateChatMode(
     last_external_message_at?: string | null;
     last_visitor_message_at?: string | null;
     last_visitor_typing_at?: string | null;
+    last_agent_typing_at?: string | null;
     last_visitor_activity_at?: string | null;
     archived_at?: string | null;
   }
@@ -485,6 +487,7 @@ export async function updateChatFields(
     last_external_message_at?: string | null;
     last_visitor_message_at?: string | null;
     last_visitor_typing_at?: string | null;
+    last_agent_typing_at?: string | null;
     last_visitor_activity_at?: string | null;
     archived_at?: string | null;
   }
@@ -518,6 +521,24 @@ export async function markVisitorTypingActivity(chatId: string, timestamp = new 
 
   if (error && !isMissingResponseStateColumnError(error)) {
     throw new HttpError(500, `Failed to update visitor activity: ${error.message}`);
+  }
+}
+
+export async function markAgentTypingActivity(
+  chatId: string,
+  isTyping: boolean,
+  timestamp = new Date().toISOString()
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("chats")
+    .update({
+      last_agent_typing_at: isTyping ? timestamp : null,
+      updated_at: timestamp
+    })
+    .eq("id", chatId);
+
+  if (error && !isMissingResponseStateColumnError(error)) {
+    throw new HttpError(500, `Failed to update agent activity: ${error.message}`);
   }
 }
 

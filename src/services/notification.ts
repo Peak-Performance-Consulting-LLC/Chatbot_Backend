@@ -184,13 +184,26 @@ export async function broadcastTypingIndicator(
   chatId: string,
   payload: {
     chat_id: string;
+    conversationId?: string;
     actor: "agent" | "visitor";
     user_id: string;
+    userId?: string;
+    userName?: string;
     is_typing: boolean;
   }
 ): Promise<void> {
   try {
-    await broadcastToChannel(`conversation:${chatId}`, "typing", payload);
+    const normalizedPayload = {
+      ...payload,
+      conversationId: payload.conversationId ?? payload.chat_id,
+      userId: payload.userId ?? payload.user_id
+    };
+    await broadcastToChannel(`conversation:${chatId}`, "typing", normalizedPayload);
+    await broadcastToChannel(
+      `conversation:${chatId}`,
+      payload.is_typing ? "typing:start" : "typing:stop",
+      normalizedPayload
+    );
   } catch (error) {
     logError("realtime_typing_broadcast_failed", {
       chat_id: chatId,

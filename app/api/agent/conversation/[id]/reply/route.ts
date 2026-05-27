@@ -4,7 +4,7 @@ import { HttpError, toHttpError } from "@/lib/httpError";
 import { getClientIp } from "@/lib/request";
 import { parseBearerToken } from "@/platform/auth";
 import { requireWorkspaceResponderPermission } from "@/platform/permissions";
-import { getChatById, insertChatMessage, touchChatThread } from "@/chat/repository";
+import { getChatById, insertChatMessage, markAgentTypingActivity, touchChatThread } from "@/chat/repository";
 import { getModeTransitionMessage, transitionMode } from "@/services/conversation";
 import { broadcastMessage, broadcastModeChange, broadcastWorkspaceInboxUpdate } from "@/services/notification";
 import { writeAuditLog } from "@/services/audit";
@@ -147,6 +147,7 @@ export async function POST(
     });
 
     // Update thread timestamp and mark first response for SLA tracking
+    await markAgentTypingActivity(chatId, false).catch(() => undefined);
     await touchChatThread(chatId);
     if (!parsed.data.is_internal) {
       await recordFirstAgentResponse(conversation).catch(() => undefined);
