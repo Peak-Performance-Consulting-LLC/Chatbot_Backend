@@ -2,6 +2,7 @@ import { assertChatOwnership } from "@/chat/repository";
 import { chatQuerySchema } from "@/chat/schemas";
 import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { toHttpError } from "@/lib/httpError";
+import { getConversationTypingState, getTypingPayloadFromTimestamp } from "@/services/typingState";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 
 export const runtime = "nodejs";
@@ -38,6 +39,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     await assertTenantDomainAccess(request, parsed.data.tenant_id);
     const chat = await assertChatOwnership(chatId, parsed.data.tenant_id, parsed.data.device_id);
+    const realtimeTyping = getConversationTypingState(chat.id);
 
     return jsonCorsResponse(request, {
       chat_id: chat.id,
@@ -46,7 +48,27 @@ export async function GET(request: Request, context: RouteContext) {
       assigned_agent_id: chat.assigned_agent_id ?? null,
       workspace_id: chat.workspace_id ?? chat.tenant_id,
       queue_id: chat.queue_id ?? null,
-      last_message_at: chat.last_message_at
+      last_message_at: chat.last_message_at,
+      typing: {
+        agent:
+          realtimeTyping.agent ??
+          getTypingPayloadFromTimestamp({
+            conversationId: chat.id,
+            actor: "agent",
+            userId: chat.assigned_agent_id ?? "agent",
+            userName: "Agent",
+            timestamp: chat.last_agent_typing_at
+          }),
+        visitor:
+          realtimeTyping.visitor ??
+          getTypingPayloadFromTimestamp({
+            conversationId: chat.id,
+            actor: "visitor",
+            userId: chat.device_id,
+            userName: "Visitor",
+            timestamp: chat.last_visitor_typing_at
+          })
+      }
     });
   } catch (error) {
     const asHttpError = toHttpError(error);

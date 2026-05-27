@@ -509,11 +509,15 @@ export async function updateChatFields(
   return data as ChatThread;
 }
 
-export async function markVisitorTypingActivity(chatId: string, timestamp = new Date().toISOString()): Promise<void> {
+export async function markVisitorTypingActivity(
+  chatId: string,
+  isTyping = true,
+  timestamp = new Date().toISOString()
+): Promise<void> {
   const { error } = await supabaseAdmin
     .from("chats")
     .update({
-      last_visitor_typing_at: timestamp,
+      last_visitor_typing_at: isTyping ? timestamp : null,
       last_visitor_activity_at: timestamp,
       updated_at: timestamp
     })

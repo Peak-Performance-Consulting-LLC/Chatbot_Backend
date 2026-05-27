@@ -5,6 +5,7 @@ import { HttpError, toHttpError } from "@/lib/httpError";
 import { parseBearerToken } from "@/platform/auth";
 import { requireWorkspaceResponderPermission } from "@/platform/permissions";
 import { broadcastTypingIndicator } from "@/services/notification";
+import { getConversationTypingState, getTypingPayloadFromTimestamp, recordTypingState } from "@/services/typingState";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,55 @@ const typingBodySchema = z.object({
 
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
+}
+
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id: chatId } = await params;
+    const token = parseBearerToken(request);
+    const chat = await getChatById(chatId);
+
+    if (!chat) {
+      throw new HttpError(404, "Conversation not found");
+    }
+
+    await requireWorkspaceResponderPermission({
+      token,
+      workspaceId: chat.workspace_id ?? chat.tenant_id,
+      permission: "conversation:view"
+    });
+
+    const realtimeTyping = getConversationTypingState(chatId);
+    return jsonCorsResponse(request, {
+      chat_id: chatId,
+      typing: {
+        agent:
+          realtimeTyping.agent ??
+          getTypingPayloadFromTimestamp({
+            conversationId: chat.id,
+            actor: "agent",
+            userId: chat.assigned_agent_id ?? "agent",
+            userName: "Agent",
+            timestamp: chat.last_agent_typing_at
+          }),
+        visitor:
+          realtimeTyping.visitor ??
+          getTypingPayloadFromTimestamp({
+            conversationId: chat.id,
+            actor: "visitor",
+            userId: chat.device_id,
+            userName: "Visitor",
+            timestamp: chat.last_visitor_typing_at
+          })
+      }
+    });
+  } catch (error) {
+    const asHttpError = toHttpError(error);
+    return jsonCorsResponse(request, { error: asHttpError.message }, asHttpError.status);
+  }
 }
 
 /**
@@ -50,13 +100,17 @@ export async function POST(
       permission: "conversation:reply"
     });
 
-    if (
-      chat.conversation_mode !== "handoff_pending" &&
-      chat.conversation_mode !== "agent_active" &&
-      chat.conversation_mode !== "copilot"
-    ) {
-      throw new HttpError(409, "Typing indicators are only supported in active agent mode");
+    if (chat.conversation_mode === "closed" || chat.conversation_status === "closed") {
+      throw new HttpError(409, "Typing indicators are not supported for closed conversations");
     }
+
+    recordTypingState({
+      conversationId: chatId,
+      actor: "agent",
+      userId: user.id,
+      userName: user.full_name,
+      isTyping: parsed.data.is_typing
+    });
 
     await markAgentTypingActivity(chatId, parsed.data.is_typing).catch(() => undefined);
 

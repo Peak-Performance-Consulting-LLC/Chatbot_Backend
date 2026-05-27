@@ -4,6 +4,7 @@ import { jsonCorsResponse, optionsCorsResponse } from "@/lib/cors";
 import { HttpError, toHttpError } from "@/lib/httpError";
 import { assertTenantDomainAccess } from "@/tenants/verifyTenant";
 import { broadcastTypingIndicator, broadcastWorkspaceInboxUpdate } from "@/services/notification";
+import { recordTypingState } from "@/services/typingState";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,13 +43,17 @@ export async function POST(
     await assertTenantDomainAccess(request, parsed.data.tenant_id);
     const chat = await assertChatOwnership(chatId, parsed.data.tenant_id, parsed.data.device_id);
 
-    if (
-      chat.conversation_mode !== "handoff_pending" &&
-      chat.conversation_mode !== "agent_active" &&
-      chat.conversation_mode !== "copilot"
-    ) {
-      throw new HttpError(409, "Typing indicators are only supported in live agent conversation modes");
+    if (chat.conversation_mode === "closed" || chat.conversation_status === "closed") {
+      throw new HttpError(409, "Typing indicators are not supported for closed conversations");
     }
+
+    recordTypingState({
+      conversationId: chatId,
+      actor: "visitor",
+      userId: parsed.data.device_id,
+      userName: "Visitor",
+      isTyping: parsed.data.is_typing
+    });
 
     await broadcastTypingIndicator(chatId, {
       chat_id: chatId,
@@ -60,8 +65,9 @@ export async function POST(
       is_typing: parsed.data.is_typing
     });
 
+    await markVisitorTypingActivity(chatId, parsed.data.is_typing).catch(() => undefined);
+
     if (parsed.data.is_typing) {
-      await markVisitorTypingActivity(chatId).catch(() => undefined);
       await broadcastWorkspaceInboxUpdate(chat.workspace_id ?? chat.tenant_id, {
         chat_id: chatId,
         tenant_id: chat.tenant_id,

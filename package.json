@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node scripts/startDev.mjs",
     "build": "rm -rf .next && next build",
-    "start": "next start -p 3000",
+    "start": "node scripts/startServer.mjs --prod",
     "lint": "next lint",
     "typecheck": "rm -rf .next tsconfig.tsbuildinfo && tsc --noEmit",
     "doctor": "tsx scripts/doctor.ts",
@@ -22,6 +22,7 @@
     "nodemailer": "^8.0.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "socket.io": "^4.8.3",
     "stripe": "^20.4.1",
     "zod": "^3.24.2"
   },
