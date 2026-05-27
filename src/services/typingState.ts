@@ -2,12 +2,20 @@ export type TypingActor = "agent" | "visitor";
 
 export type TypingStatePayload = {
   chat_id: string;
+  chatId: string;
+  conversation_id: string;
   conversationId: string;
   actor: TypingActor;
+  sender_type: TypingActor;
   user_id: string;
+  sender_id: string;
   userId: string;
   userName?: string;
+  user_name?: string;
+  senderName?: string;
   is_typing: boolean;
+  isTyping: boolean;
+  typing: boolean;
   updated_at: string;
 };
 
@@ -37,12 +45,20 @@ globalTypingState[GLOBAL_TYPING_STATE_KEY] = typingByConversation;
 function toPayload(entry: TypingEntry): TypingStatePayload {
   return {
     chat_id: entry.conversationId,
+    chatId: entry.conversationId,
+    conversation_id: entry.conversationId,
     conversationId: entry.conversationId,
     actor: entry.actor,
+    sender_type: entry.actor,
     user_id: entry.userId,
+    sender_id: entry.userId,
     userId: entry.userId,
     userName: entry.userName,
+    user_name: entry.userName,
+    senderName: entry.userName,
     is_typing: true,
+    isTyping: true,
+    typing: true,
     updated_at: entry.updatedAtIso
   };
 }
@@ -126,12 +142,20 @@ export function getTypingPayloadFromTimestamp(input: {
 
   return {
     chat_id: input.conversationId,
+    chatId: input.conversationId,
+    conversation_id: input.conversationId,
     conversationId: input.conversationId,
     actor: input.actor,
+    sender_type: input.actor,
     user_id: input.userId,
+    sender_id: input.userId,
     userId: input.userId,
     userName: input.userName?.trim() || undefined,
+    user_name: input.userName?.trim() || undefined,
+    senderName: input.userName?.trim() || undefined,
     is_typing: true,
+    isTyping: true,
+    typing: true,
     updated_at: input.timestamp
   };
 }

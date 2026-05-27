@@ -14,23 +14,47 @@ function getConversationRoom(conversationId) {
 
 function normalizeTypingPayload(payload, socket) {
   const input = payload && typeof payload === "object" ? payload : {};
-  const conversationId = normalizeString(input.conversationId) || normalizeString(input.chat_id) || normalizeString(socket.data.conversationId);
-  const userId = normalizeString(input.userId) || normalizeString(input.user_id) || normalizeString(socket.data.userId);
-  const actor = input.actor === "agent" || input.actor === "visitor" ? input.actor : socket.data.actor;
+  const conversationId =
+    normalizeString(input.conversationId) ||
+    normalizeString(input.chat_id) ||
+    normalizeString(input.chatId) ||
+    normalizeString(input.conversation_id) ||
+    normalizeString(socket.data.conversationId);
+  const userId =
+    normalizeString(input.userId) ||
+    normalizeString(input.user_id) ||
+    normalizeString(input.sender_id) ||
+    normalizeString(socket.data.userId);
+  const actor =
+    input.actor === "agent" || input.actor === "visitor"
+      ? input.actor
+      : input.sender_type === "agent" || input.sender_type === "visitor"
+        ? input.sender_type
+        : socket.data.actor;
 
   if (!conversationId || !userId || (actor !== "agent" && actor !== "visitor")) {
     return null;
   }
 
-  const userName = normalizeString(input.userName) || normalizeString(input.user_name) || normalizeString(socket.data.userName);
+  const userName =
+    normalizeString(input.userName) ||
+    normalizeString(input.user_name) ||
+    normalizeString(input.senderName) ||
+    normalizeString(socket.data.userName);
 
   return {
     chat_id: conversationId,
+    chatId: conversationId,
+    conversation_id: conversationId,
     conversationId,
     actor,
+    sender_type: actor,
     user_id: userId,
+    sender_id: userId,
     userId,
-    userName: userName || undefined
+    userName: userName || undefined,
+    user_name: userName || undefined,
+    senderName: userName || undefined
   };
 }
 
@@ -52,7 +76,9 @@ function broadcastTyping(socket, eventName, payload) {
   const room = getConversationRoom(normalized.conversationId);
   const outgoing = {
     ...normalized,
-    is_typing: isTyping
+    is_typing: isTyping,
+    isTyping,
+    typing: isTyping
   };
 
   socket.join(room);
@@ -111,7 +137,9 @@ function attachSocketServer(httpServer) {
       const room = getConversationRoom(normalized.conversationId);
       const outgoing = {
         ...normalized,
-        is_typing: false
+        is_typing: false,
+        isTyping: false,
+        typing: false
       };
       socket.to(room).emit("typing:stop", outgoing);
       socket.to(room).emit("typing", outgoing);

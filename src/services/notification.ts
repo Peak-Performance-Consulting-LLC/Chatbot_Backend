@@ -195,8 +195,16 @@ export async function broadcastTypingIndicator(
   try {
     const normalizedPayload = {
       ...payload,
+      chatId: payload.chat_id,
+      conversation_id: payload.conversationId ?? payload.chat_id,
       conversationId: payload.conversationId ?? payload.chat_id,
-      userId: payload.userId ?? payload.user_id
+      sender_type: payload.actor,
+      sender_id: payload.userId ?? payload.user_id,
+      userId: payload.userId ?? payload.user_id,
+      isTyping: payload.is_typing,
+      typing: payload.is_typing,
+      user_name: payload.userName,
+      senderName: payload.userName
     };
     await broadcastToChannel(`conversation:${chatId}`, "typing", normalizedPayload);
     await broadcastToChannel(
