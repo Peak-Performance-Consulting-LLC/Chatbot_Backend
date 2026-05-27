@@ -39,7 +39,7 @@ export async function GET(request: Request, context: RouteContext) {
 
     await assertTenantDomainAccess(request, parsed.data.tenant_id);
     const chat = await assertChatOwnership(chatId, parsed.data.tenant_id, parsed.data.device_id);
-    const realtimeTyping = getConversationTypingState(chat.id);
+    const realtimeTyping = await getConversationTypingState(chat.id);
 
     return jsonCorsResponse(request, {
       chat_id: chat.id,

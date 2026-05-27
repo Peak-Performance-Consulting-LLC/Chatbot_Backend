@@ -47,7 +47,7 @@ export async function POST(
       throw new HttpError(409, "Typing indicators are not supported for closed conversations");
     }
 
-    recordTypingState({
+    await recordTypingState({
       conversationId: chatId,
       actor: "visitor",
       userId: parsed.data.device_id,

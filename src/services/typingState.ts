@@ -1,3 +1,6 @@
+import { Redis } from "@upstash/redis";
+import { getEnv } from "@/config/env";
+
 export type TypingActor = "agent" | "visitor";
 
 export type TypingStatePayload = {
@@ -29,7 +32,17 @@ type TypingEntry = {
 };
 
 const TYPING_TTL_MS = 8000;
+const TYPING_TTL_SECONDS = Math.ceil(TYPING_TTL_MS / 1000);
 const GLOBAL_TYPING_STATE_KEY = "__aeroconciergeTypingState";
+
+const env = getEnv();
+const redisClient =
+  env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN
+    ? new Redis({
+        url: env.UPSTASH_REDIS_REST_URL,
+        token: env.UPSTASH_REDIS_REST_TOKEN
+      })
+    : null;
 
 type GlobalTypingState = typeof globalThis & {
   [GLOBAL_TYPING_STATE_KEY]?: Map<string, Partial<Record<TypingActor, TypingEntry>>>;
@@ -84,7 +97,45 @@ function pruneConversation(conversationId: string, nowMs = Date.now()) {
   return state;
 }
 
-export function recordTypingState(input: {
+function typingKey(conversationId: string, actor: TypingActor) {
+  return `typing:${conversationId}:${actor}`;
+}
+
+async function writeRedisTypingEntry(entry: TypingEntry) {
+  if (!redisClient) {
+    return;
+  }
+
+  await redisClient.set(typingKey(entry.conversationId, entry.actor), entry, {
+    ex: TYPING_TTL_SECONDS
+  });
+}
+
+async function deleteRedisTypingEntry(conversationId: string, actor: TypingActor) {
+  if (!redisClient) {
+    return;
+  }
+
+  await redisClient.del(typingKey(conversationId, actor));
+}
+
+async function readRedisTypingEntry(
+  conversationId: string,
+  actor: TypingActor,
+  nowMs = Date.now()
+): Promise<TypingEntry | null> {
+  if (!redisClient) {
+    return null;
+  }
+
+  const entry = await redisClient.get<TypingEntry>(typingKey(conversationId, actor));
+  if (!entry || nowMs - entry.updatedAtMs > TYPING_TTL_MS) {
+    return null;
+  }
+  return entry;
+}
+
+export async function recordTypingState(input: {
   conversationId: string;
   actor: TypingActor;
   userId: string;
@@ -102,10 +153,11 @@ export function recordTypingState(input: {
     } else {
       typingByConversation.set(input.conversationId, existing);
     }
+    await deleteRedisTypingEntry(input.conversationId, input.actor).catch(() => undefined);
     return;
   }
 
-  existing[input.actor] = {
+  const entry: TypingEntry = {
     conversationId: input.conversationId,
     actor: input.actor,
     userId: input.userId,
@@ -113,14 +165,22 @@ export function recordTypingState(input: {
     updatedAtMs: nowMs,
     updatedAtIso
   };
+  existing[input.actor] = entry;
   typingByConversation.set(input.conversationId, existing);
+  await writeRedisTypingEntry(entry).catch(() => undefined);
 }
 
-export function getConversationTypingState(conversationId: string) {
+export async function getConversationTypingState(conversationId: string) {
+  const nowMs = Date.now();
   const state = pruneConversation(conversationId);
+  const redisAgent = state?.agent ? null : await readRedisTypingEntry(conversationId, "agent", nowMs).catch(() => null);
+  const redisVisitor = state?.visitor
+    ? null
+    : await readRedisTypingEntry(conversationId, "visitor", nowMs).catch(() => null);
+
   return {
-    agent: state?.agent ? toPayload(state.agent) : null,
-    visitor: state?.visitor ? toPayload(state.visitor) : null
+    agent: state?.agent ? toPayload(state.agent) : redisAgent ? toPayload(redisAgent) : null,
+    visitor: state?.visitor ? toPayload(state.visitor) : redisVisitor ? toPayload(redisVisitor) : null
   };
 }
 

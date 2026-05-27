@@ -37,7 +37,7 @@ export async function GET(
       permission: "conversation:view"
     });
 
-    const realtimeTyping = getConversationTypingState(chatId);
+    const realtimeTyping = await getConversationTypingState(chatId);
     return jsonCorsResponse(request, {
       chat_id: chatId,
       typing: {
@@ -104,7 +104,7 @@ export async function POST(
       throw new HttpError(409, "Typing indicators are not supported for closed conversations");
     }
 
-    recordTypingState({
+    await recordTypingState({
       conversationId: chatId,
       actor: "agent",
       userId: user.id,
