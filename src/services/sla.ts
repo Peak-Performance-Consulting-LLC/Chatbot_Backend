@@ -3,16 +3,18 @@ import {
   insertConversationEvent,
   insertChatMessage,
   listPendingHandoffChatsForSla,
+  listVisitorInactiveChatsForMaintenance,
+  touchChatThread,
   updateChatFields
 } from "@/chat/repository";
 import type { ChatThread } from "@/chat/types";
 import {
   getQueueById,
-  listWorkspaceSupervisors,
+  listWorkspaceNotificationRecipients,
   touchQueueMemberLastAssigned,
   type QueueRecord
 } from "@/agent/repository";
-import { acceptConversation, getModeTransitionMessage } from "@/services/conversation";
+import { acceptConversation, closeConversation, getModeTransitionMessage } from "@/services/conversation";
 import { findEligibleAgentForQueue, buildSlaTargetsForQueue } from "@/services/routing";
 import {
   broadcastAgentNotification,
@@ -21,6 +23,13 @@ import {
   broadcastQueueConversation,
   broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
+
+const VISITOR_INACTIVITY_WARNING_MS = 60 * 1000;
+const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 60 * 1000;
+const VISITOR_INACTIVITY_WARNING_MESSAGE =
+  "Due to inactivity, this conversation will be marked as closed in 1 minute. Please send a message if you still need help.";
+const VISITOR_INACTIVITY_CLOSED_MESSAGE =
+  "This conversation has been closed due to inactivity. You can start a new chat anytime if you need more help.";
 
 function toDate(value: string | null | undefined): Date | null {
   if (!value) {
@@ -42,16 +51,191 @@ function getSlaAnchor(chat: ChatThread): Date | null {
   );
 }
 
-async function notifyWorkspaceSupervisors(
+async function notifyWorkspaceNotificationRecipients(
   workspaceId: string,
   payload: Record<string, unknown>
 ) {
-  const supervisors = await listWorkspaceSupervisors(workspaceId);
+  const recipients = await listWorkspaceNotificationRecipients(workspaceId);
   await Promise.all(
-    supervisors.map((supervisor) =>
-      broadcastAgentNotification(supervisor.user_id, "inbox_update", payload)
+    recipients.map((recipient) =>
+      broadcastAgentNotification(recipient.user_id, "inbox_update", payload)
     )
   );
+}
+
+function getVisitorInactivityAnchor(conversation: ChatThread): Date | null {
+  return (
+    toDate(conversation.last_external_message_at) ||
+    toDate(conversation.last_visitor_message_at) ||
+    toDate(conversation.last_visitor_activity_at) ||
+    toDate(conversation.handoff_requested_at) ||
+    toDate(conversation.updated_at)
+  );
+}
+
+function hasExternalActivityAfterWarning(conversation: ChatThread): boolean {
+  const warningSentAt = toDate(conversation.visitor_inactivity_warning_sent_at);
+  const lastExternalAt = toDate(conversation.last_external_message_at);
+  return Boolean(warningSentAt && lastExternalAt && lastExternalAt > warningSentAt);
+}
+
+function getVisitorInactivityAgeMs(conversation: ChatThread, now: Date): number | null {
+  const anchor = getVisitorInactivityAnchor(conversation);
+  if (!anchor) {
+    return null;
+  }
+  return Math.max(0, now.getTime() - anchor.getTime());
+}
+
+function isVisitorInactivityWarningDue(conversation: ChatThread, now: Date): boolean {
+  if (conversation.visitor_inactivity_warning_sent_at) {
+    return false;
+  }
+  const ageMs = getVisitorInactivityAgeMs(conversation, now);
+  return ageMs !== null && ageMs >= VISITOR_INACTIVITY_WARNING_MS;
+}
+
+function isVisitorInactivityCloseDue(conversation: ChatThread, now: Date): boolean {
+  if (hasExternalActivityAfterWarning(conversation)) {
+    return false;
+  }
+
+  const closeDueAt =
+    toDate(conversation.visitor_inactivity_close_due_at) ??
+    (() => {
+      const warnedAt = toDate(conversation.visitor_inactivity_warning_sent_at);
+      return warnedAt ? new Date(warnedAt.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS) : null;
+    })();
+
+  if (closeDueAt && now >= closeDueAt) {
+    return true;
+  }
+
+  const ageMs = getVisitorInactivityAgeMs(conversation, now);
+  return ageMs !== null && ageMs >= VISITOR_INACTIVITY_WARNING_MS + VISITOR_INACTIVITY_CLOSE_GRACE_MS;
+}
+
+async function warnVisitorAboutInactivity(conversation: ChatThread, now: Date) {
+  const warnedAt = now.toISOString();
+  const closeDueAt = new Date(now.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS).toISOString();
+  const message = await insertChatMessage({
+    chat_id: conversation.id,
+    role: "system",
+    content: VISITOR_INACTIVITY_WARNING_MESSAGE,
+    sender_type: "system",
+    metadata: {
+      visitor_inactivity_warning: true,
+      close_due_at: closeDueAt
+    }
+  });
+
+  await Promise.all([
+    updateChatFields(conversation.id, {
+      visitor_inactivity_warning_sent_at: warnedAt,
+      visitor_inactivity_close_due_at: closeDueAt
+    }),
+    touchChatThread(conversation.id)
+  ]);
+
+  await Promise.all([
+    broadcastMessage(conversation.id, message),
+    broadcastWorkspaceInboxUpdate(conversation.workspace_id ?? conversation.tenant_id, {
+      chat_id: conversation.id,
+      tenant_id: conversation.tenant_id,
+      queue_id: conversation.queue_id ?? null,
+      mode: conversation.conversation_mode,
+      reason: "visitor_inactivity_warning",
+      visitor_inactivity_close_due_at: closeDueAt
+    })
+  ]);
+}
+
+async function closeVisitorInactiveConversation(conversation: ChatThread) {
+  const closeMessage = await insertChatMessage({
+    chat_id: conversation.id,
+    role: "system",
+    content: VISITOR_INACTIVITY_CLOSED_MESSAGE,
+    sender_type: "system",
+    metadata: {
+      visitor_inactivity_auto_close: true
+    }
+  });
+  await touchChatThread(conversation.id);
+  await broadcastMessage(conversation.id, closeMessage);
+
+  const updated = await closeConversation(conversation.id, undefined, "system");
+  await Promise.all([
+    broadcastModeChange(conversation.id, "closed", {
+      closed_at: updated.closed_at,
+      reason: "visitor_inactivity"
+    }),
+    broadcastWorkspaceInboxUpdate(conversation.workspace_id ?? conversation.tenant_id, {
+      chat_id: conversation.id,
+      tenant_id: conversation.tenant_id,
+      queue_id: conversation.queue_id ?? null,
+      mode: "closed",
+      reason: "visitor_inactivity_closed",
+      closed_at: updated.closed_at
+    })
+  ]);
+}
+
+async function processVisitorInactivity(input: {
+  now: Date;
+  limit: number;
+  workspaceIds?: string[];
+}): Promise<{
+  warnings: number;
+  closures: number;
+}> {
+  const olderThan = new Date(input.now.getTime() - VISITOR_INACTIVITY_WARNING_MS).toISOString();
+  const conversations = await listVisitorInactiveChatsForMaintenance({
+    olderThan,
+    dueBefore: input.now.toISOString(),
+    workspaceIds: input.workspaceIds,
+    limit: input.limit
+  });
+  let warnings = 0;
+  let closures = 0;
+
+  for (const candidate of conversations) {
+    const latest = await getChatById(candidate.id);
+    if (
+      !latest ||
+      latest.conversation_mode === "closed" ||
+      latest.conversation_status === "closed" ||
+      latest.last_external_sender_type !== "agent"
+    ) {
+      continue;
+    }
+
+    if (isVisitorInactivityCloseDue(latest, input.now)) {
+      await closeVisitorInactiveConversation(latest);
+      closures += 1;
+      continue;
+    }
+
+    if (isVisitorInactivityWarningDue(latest, input.now)) {
+      await warnVisitorAboutInactivity(latest, input.now);
+      warnings += 1;
+    }
+  }
+
+  return { warnings, closures };
+}
+
+export async function runVisitorInactivityMaintenance(input?: {
+  workspaceIds?: string[];
+  limit?: number;
+}): Promise<{
+  warnings: number;
+  closures: number;
+}> {
+  return processVisitorInactivity({
+    now: new Date(),
+    limit: input?.limit ?? 300,
+    workspaceIds: input?.workspaceIds
+  });
 }
 
 async function tryAutoAssignFromQueue(input: {
@@ -164,6 +348,8 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
   breaches: number;
   overflowRerouted: number;
   autoAssigned: number;
+  inactivityWarnings: number;
+  inactivityClosures: number;
 }> {
   const now = new Date();
   const nowIso = now.toISOString();
@@ -230,7 +416,7 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
         })
       ]);
 
-      await notifyWorkspaceSupervisors(conversation.workspace_id ?? conversation.tenant_id, {
+      await notifyWorkspaceNotificationRecipients(conversation.workspace_id ?? conversation.tenant_id, {
         type: "sla_warning",
         chat_id: conversation.id,
         queue_id: conversation.queue_id,
@@ -263,7 +449,7 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
       })
     ]);
 
-    await notifyWorkspaceSupervisors(conversation.workspace_id ?? conversation.tenant_id, {
+    await notifyWorkspaceNotificationRecipients(conversation.workspace_id ?? conversation.tenant_id, {
       type: "sla_breached",
       chat_id: conversation.id,
       queue_id: conversation.queue_id,
@@ -360,12 +546,19 @@ export async function runSlaMaintenanceSweep(limit = 300): Promise<{
     }
   }
 
+  const inactivity = await processVisitorInactivity({
+    now,
+    limit
+  });
+
   return {
     scanned: conversations.length,
     warnings,
     breaches,
     overflowRerouted,
-    autoAssigned
+    autoAssigned,
+    inactivityWarnings: inactivity.warnings,
+    inactivityClosures: inactivity.closures
   };
 }
 

@@ -4,6 +4,7 @@ import { parseBearerToken } from "@/platform/auth";
 import { hasWorkspacePermission, isWorkspaceResponderRole } from "@/platform/permissions";
 import { listUserTenantIds, listWorkspaceRolesForUser, resolvePlatformSession } from "@/platform/repository";
 import { listAgentInboxConversations } from "@/agent/repository";
+import { runVisitorInactivityMaintenance } from "@/services/sla";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,6 +41,8 @@ export async function GET(request: Request) {
     }
     const url = new URL(request.url);
     const requestedTenantId = (url.searchParams.get("tenant_id") ?? "").trim();
+    const requestedStatus = (url.searchParams.get("status") ?? "active").trim().toLowerCase();
+    const status = requestedStatus === "closed" ? "closed" : "active";
     const scopedWorkspaceIds = requestedTenantId
       ? readableWorkspaceIds.filter((workspaceId) => workspaceId === requestedTenantId)
       : readableWorkspaceIds;
@@ -48,9 +51,17 @@ export async function GET(request: Request) {
       return jsonCorsResponse(request, { error: "Workspace access denied" }, 403);
     }
 
+    if (status === "active") {
+      await runVisitorInactivityMaintenance({
+        workspaceIds: scopedWorkspaceIds,
+        limit: 500
+      });
+    }
+
     const inbox = await listAgentInboxConversations({
       user_id: user.id,
-      workspace_ids: scopedWorkspaceIds
+      workspace_ids: scopedWorkspaceIds,
+      status
     });
 
     return jsonCorsResponse(request, {
@@ -61,7 +72,8 @@ export async function GET(request: Request) {
       waiting_count: inbox.waiting_count,
       answered_count: inbox.answered_count,
       high_waiting_count: inbox.high_waiting_count,
-      critical_waiting_count: inbox.critical_waiting_count
+      critical_waiting_count: inbox.critical_waiting_count,
+      closed_count: inbox.closed_count
     });
   } catch (error) {
     const asHttpError = toHttpError(error);

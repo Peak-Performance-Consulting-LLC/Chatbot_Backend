@@ -17,7 +17,6 @@ export type WorkspacePermission =
   | "conversation:accept"
   | "conversation:reply"
   | "conversation:transfer"
-  | "conversation:supervise"
   | "presence:update";
 
 const PERMISSIONS_BY_ROLE: Record<WorkspaceRole, Set<WorkspacePermission>> = {
@@ -30,7 +29,6 @@ const PERMISSIONS_BY_ROLE: Record<WorkspaceRole, Set<WorkspacePermission>> = {
     "conversation:accept",
     "conversation:reply",
     "conversation:transfer",
-    "conversation:supervise",
     "presence:update"
   ]),
   admin: new Set([
@@ -42,17 +40,6 @@ const PERMISSIONS_BY_ROLE: Record<WorkspaceRole, Set<WorkspacePermission>> = {
     "conversation:accept",
     "conversation:reply",
     "conversation:transfer",
-    "conversation:supervise",
-    "presence:update"
-  ]),
-  supervisor: new Set([
-    "workspace:read",
-    "queue:manage",
-    "conversation:view",
-    "conversation:accept",
-    "conversation:reply",
-    "conversation:transfer",
-    "conversation:supervise",
     "presence:update"
   ]),
   agent: new Set([

@@ -25,7 +25,7 @@ function isAuthorized(request: Request): boolean {
 
 /**
  * GET /api/cron/sla-breach
- * Run every 30s via Vercel cron.
+ * Runs SLA maintenance plus visitor inactivity warning/auto-close work.
  */
 export async function GET(request: Request) {
   if (!isAuthorized(request)) {

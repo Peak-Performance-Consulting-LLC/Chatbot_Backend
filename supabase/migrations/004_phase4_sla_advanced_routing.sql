@@ -1,4 +1,4 @@
--- Phase 4: Supervisor Controls, SLA, Business Hours, Overflow, Copilot
+-- Phase 4: SLA, Business Hours, Overflow, Copilot
 
 -- ============================================================
 -- 1) Queue configuration for after-hours + SLA + overflow

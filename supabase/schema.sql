@@ -563,7 +563,6 @@ do $$ begin
   create type workspace_member_role as enum (
     'owner',
     'admin',
-    'supervisor',
     'agent',
     'viewer'
   );
@@ -757,7 +756,7 @@ create index if not exists idx_audit_logs_actor
   on public.audit_logs (actor_user_id, created_at desc);
 
 -- ============================================================================
--- PHASE 4: SUPERVISOR CONTROLS, SLA, BUSINESS HOURS, OVERFLOW, COPILOT
+-- PHASE 4: SLA, BUSINESS HOURS, OVERFLOW, COPILOT
 -- ============================================================================
 
 alter table public.queues
@@ -865,7 +864,7 @@ alter table public.conversation_csat
   add constraint conversation_csat_rating_check
     check (rating >= 1 and rating <= 5),
   add constraint conversation_csat_submitted_by_check
-    check (submitted_by in ('visitor', 'agent', 'supervisor', 'system'));
+    check (submitted_by in ('visitor', 'agent', 'system'));
 
 create index if not exists idx_conversation_csat_tenant_submitted
   on public.conversation_csat (tenant_id, submitted_at desc);
@@ -909,6 +908,43 @@ create index if not exists idx_chats_inbox_queue_pending_phase5
     and conversation_status in ('active', 'waiting', 'assigned');
 
 alter table public.chats
+  add column if not exists awaiting_agent_reply boolean not null default false,
+  add column if not exists last_external_sender_type text,
+  add column if not exists last_external_message_at timestamptz,
+  add column if not exists last_visitor_message_at timestamptz,
+  add column if not exists last_visitor_typing_at timestamptz,
+  add column if not exists last_visitor_activity_at timestamptz;
+
+alter table public.chats
+  drop constraint if exists chats_last_external_sender_type_check;
+
+alter table public.chats
+  add constraint chats_last_external_sender_type_check
+    check (
+      last_external_sender_type is null
+      or last_external_sender_type in ('visitor', 'agent')
+    );
+
+create index if not exists idx_chats_shared_inbox_waiting_phase6
+  on public.chats (
+    workspace_id,
+    awaiting_agent_reply desc,
+    last_external_message_at desc,
+    last_message_at desc
+  )
+  where conversation_mode in ('handoff_pending', 'agent_active', 'copilot')
+    and conversation_status in ('active', 'waiting', 'assigned');
+
+create index if not exists idx_chats_inbox_visitor_activity_phase7
+  on public.chats (
+    workspace_id,
+    last_visitor_activity_at desc,
+    last_message_at desc
+  )
+  where conversation_mode in ('handoff_pending', 'agent_active', 'copilot')
+    and conversation_status in ('active', 'waiting', 'assigned');
+
+alter table public.chats
   add column if not exists last_agent_typing_at timestamptz;
 
 create index if not exists idx_chats_agent_typing_activity
@@ -916,6 +952,24 @@ create index if not exists idx_chats_agent_typing_activity
   where conversation_mode in ('handoff_pending', 'agent_active', 'copilot')
     and conversation_status in ('active', 'waiting', 'assigned')
     and last_agent_typing_at is not null;
+
+alter table public.chats
+  add column if not exists visitor_inactivity_warning_sent_at timestamptz,
+  add column if not exists visitor_inactivity_close_due_at timestamptz;
+
+create index if not exists idx_chats_visitor_inactivity_auto_close
+  on public.chats (
+    workspace_id,
+    visitor_inactivity_close_due_at asc,
+    last_external_message_at asc
+  )
+  where conversation_mode in ('handoff_pending', 'agent_active', 'copilot')
+    and conversation_status in ('active', 'waiting', 'assigned')
+    and (
+      last_external_message_at is not null
+      or last_visitor_message_at is not null
+      or visitor_inactivity_close_due_at is not null
+    );
 
 -- ============================================================================
 -- PHASE 0 COMPLETION: BASE RLS POLICIES

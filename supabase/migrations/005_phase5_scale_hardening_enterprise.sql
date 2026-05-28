@@ -72,7 +72,7 @@ alter table public.conversation_csat
   add constraint conversation_csat_rating_check
     check (rating >= 1 and rating <= 5),
   add constraint conversation_csat_submitted_by_check
-    check (submitted_by in ('visitor', 'agent', 'supervisor', 'system'));
+    check (submitted_by in ('visitor', 'agent', 'system'));
 
 create index if not exists idx_conversation_csat_tenant_submitted
   on public.conversation_csat (tenant_id, submitted_at desc);

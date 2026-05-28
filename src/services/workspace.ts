@@ -68,7 +68,7 @@ function canManageTeam(role: WorkspaceMemberRole): boolean {
 
 function normalizeInviteRole(input?: string): WorkspaceMemberRole {
   const role = (input ?? "agent").trim().toLowerCase();
-  if (role === "owner" || role === "admin" || role === "supervisor" || role === "agent" || role === "viewer") {
+  if (role === "owner" || role === "admin" || role === "agent" || role === "viewer") {
     return role;
   }
   return "agent";

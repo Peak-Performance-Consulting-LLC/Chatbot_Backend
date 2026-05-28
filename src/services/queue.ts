@@ -8,8 +8,6 @@ import {
   getFirstActiveVipQueue,
   getQueueById,
   getWorkspaceMemberByUser,
-  listAgentLoadForQueues,
-  listQueueConversations,
   listQueueIdsForUser,
   listQueueMembersWithAgent,
   listQueues,
@@ -21,12 +19,12 @@ import {
   updateChatQueue
 } from "@/agent/repository";
 
-const MANAGE_QUEUE_ROLES = new Set(["owner", "admin", "supervisor"]);
+const MANAGE_QUEUE_ROLES = new Set(["owner", "admin"]);
 const DEFAULT_WORKSPACE_QUEUE_NAME = "General Support";
 
 function assertCanManageQueues(role: string) {
   if (!MANAGE_QUEUE_ROLES.has(role)) {
-    throw new HttpError(403, "Only owners, admins, and supervisors can manage queues");
+    throw new HttpError(403, "Only owners and admins can manage queues");
   }
 }
 
@@ -231,54 +229,6 @@ export async function getUserQueueIds(input: {
   userId: string;
 }) {
   return listQueueIdsForUser(input.workspaceId, input.userId);
-}
-
-export async function listSupervisorQueueConversations(input: {
-  workspaceId: string;
-  actorUserId: string;
-  includeClosed?: boolean;
-}) {
-  const member = await getWorkspaceMemberByUser(input.workspaceId, input.actorUserId);
-  if (!member) {
-    throw new HttpError(403, "Workspace access denied");
-  }
-
-  const queueIds = await listQueueIdsForUser(input.workspaceId, input.actorUserId);
-  if (queueIds.length === 0 && member.role === "supervisor") {
-    return [];
-  }
-
-  const targetQueueIds =
-    queueIds.length > 0 ? queueIds : (await listQueues(input.workspaceId)).map((queue) => queue.id);
-
-  return listQueueConversations({
-    workspace_id: input.workspaceId,
-    queue_ids: targetQueueIds,
-    include_closed: input.includeClosed ?? false,
-    limit: 400
-  });
-}
-
-export async function listSupervisorAgentLoad(input: {
-  workspaceId: string;
-  actorUserId: string;
-}) {
-  const member = await getWorkspaceMemberByUser(input.workspaceId, input.actorUserId);
-  if (!member) {
-    throw new HttpError(403, "Workspace access denied");
-  }
-
-  const queueIds = await listQueueIdsForUser(input.workspaceId, input.actorUserId);
-  if (queueIds.length === 0 && member.role === "supervisor") {
-    return [];
-  }
-  const targetQueueIds =
-    queueIds.length > 0 ? queueIds : (await listQueues(input.workspaceId)).map((queue) => queue.id);
-
-  return listAgentLoadForQueues({
-    workspace_id: input.workspaceId,
-    queue_ids: targetQueueIds
-  });
 }
 
 export async function resolveConversationQueue(chat: ChatThread): Promise<{

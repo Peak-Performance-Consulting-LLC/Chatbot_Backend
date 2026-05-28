@@ -17,13 +17,13 @@ export const dynamic = "force-dynamic";
 const inviteSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   email: z.string().trim().email().max(160),
-  role: z.enum(["owner", "admin", "supervisor", "agent", "viewer"]).optional()
+  role: z.enum(["owner", "admin", "agent", "viewer"]).optional()
 });
 
 const updateRoleSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   user_id: z.string().uuid(),
-  role: z.enum(["owner", "admin", "supervisor", "agent", "viewer"])
+  role: z.enum(["owner", "admin", "agent", "viewer"])
 });
 
 const removeMemberSchema = z.object({

@@ -9,7 +9,6 @@ do $$ begin
   create type workspace_member_role as enum (
     'owner',
     'admin',
-    'supervisor',
     'agent',
     'viewer'
   );

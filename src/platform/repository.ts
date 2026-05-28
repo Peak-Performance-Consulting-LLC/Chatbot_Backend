@@ -274,7 +274,7 @@ export type PlatformSession = {
   expires_at: string;
 };
 
-export type WorkspaceRole = "owner" | "admin" | "supervisor" | "agent" | "viewer";
+export type WorkspaceRole = "owner" | "admin" | "agent" | "viewer";
 
 export type WorkspaceInvitationRecord = {
   id: string;
@@ -1314,7 +1314,7 @@ export async function getWorkspaceRoleForUser(
   }
 
   const role = member.role.trim().toLowerCase();
-  if (role === "owner" || role === "admin" || role === "supervisor" || role === "agent" || role === "viewer") {
+  if (role === "owner" || role === "admin" || role === "agent" || role === "viewer") {
     return role;
   }
 
@@ -1351,7 +1351,7 @@ export async function listWorkspaceRolesForUser(
       continue;
     }
     const role = row.role?.trim().toLowerCase();
-    if (role === "owner" || role === "admin" || role === "supervisor" || role === "agent" || role === "viewer") {
+    if (role === "owner" || role === "admin" || role === "agent" || role === "viewer") {
       roleMap.set(workspaceId, role);
     } else {
       roleMap.set(workspaceId, "agent");

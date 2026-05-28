@@ -28,7 +28,7 @@ type WorkspacePresenceRow = {
   full_name: string;
   email: string;
   avatar_url: string | null;
-  role: "owner" | "admin" | "supervisor" | "agent" | "viewer";
+  role: "owner" | "admin" | "agent" | "viewer";
   status: AgentPresenceStatus;
   last_heartbeat_at: string | null;
 };

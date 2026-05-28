@@ -13,7 +13,7 @@ type PasswordResetEmailInput = {
 type WorkspaceInvitationEmailInput = {
   to: string;
   workspaceName: string;
-  role: "owner" | "admin" | "supervisor" | "agent" | "viewer";
+  role: "owner" | "admin" | "agent" | "viewer";
   inviteUrl: string;
   expiresAt: string;
   inviterName?: string;

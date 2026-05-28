@@ -2,7 +2,7 @@ import { HttpError } from "@/lib/httpError";
 import { supabaseAdmin } from "@/lib/supabase";
 import type { ChatThread, ConversationMode, VisitorState, WaitingUrgency } from "@/chat/types";
 
-export type WorkspaceMemberRole = "owner" | "admin" | "supervisor" | "agent" | "viewer";
+export type WorkspaceMemberRole = "owner" | "admin" | "agent" | "viewer";
 export type AgentPresenceStatus = "online" | "away" | "offline";
 export type AgentEffectiveStatus = "online" | "busy" | "away" | "offline";
 export type QueueRoutingMode = "manual_accept" | "auto_assign";
@@ -75,6 +75,7 @@ export type AgentInboxPayload = {
   answered_count: number;
   high_waiting_count: number;
   critical_waiting_count: number;
+  closed_count: number;
 };
 
 type WorkspaceMemberWithUserRow = WorkspaceMemberRecord & {
@@ -674,6 +675,9 @@ function isMissingSharedInboxColumnError(error: { code?: string | null; message?
 }
 
 function isConversationWaitingForAgent(conversation: ChatThread): boolean {
+  if (conversation.conversation_mode === "closed" || conversation.conversation_status === "closed") {
+    return false;
+  }
   const waitingFlag = (conversation as Partial<ChatThread>).awaiting_agent_reply;
   if (typeof waitingFlag === "boolean") {
     return waitingFlag;
@@ -754,6 +758,7 @@ function conversationPriorityTs(conversation: ChatThread): number {
 export async function listAgentInboxConversations(input: {
   user_id: string;
   workspace_ids: string[];
+  status?: "active" | "closed";
 }): Promise<AgentInboxPayload> {
   if (input.workspace_ids.length === 0) {
     return {
@@ -763,28 +768,46 @@ export async function listAgentInboxConversations(input: {
       waiting_count: 0,
       answered_count: 0,
       high_waiting_count: 0,
-      critical_waiting_count: 0
+      critical_waiting_count: 0,
+      closed_count: 0
     };
   }
 
-  let { data, error } = await supabaseAdmin
+  const isClosedView = input.status === "closed";
+  let query = supabaseAdmin
     .from("chats")
     .select("*")
-    .in("tenant_id", input.workspace_ids)
-    .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
-    .in("conversation_status", ["active", "waiting", "assigned"])
+    .in("tenant_id", input.workspace_ids);
+
+  if (isClosedView) {
+    query = query.or("conversation_mode.eq.closed,conversation_status.eq.closed");
+  } else {
+    query = query
+      .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
+      .in("conversation_status", ["active", "waiting", "assigned"]);
+  }
+
+  let { data, error } = await query
     .order("awaiting_agent_reply", { ascending: false })
-    .order("last_external_message_at", { ascending: false, nullsFirst: false })
+    .order(isClosedView ? "closed_at" : "last_external_message_at", { ascending: false, nullsFirst: false })
     .order("last_message_at", { ascending: false })
     .limit(400);
 
   if (error && isMissingSharedInboxColumnError(error)) {
-    const fallback = await supabaseAdmin
+    let fallbackQuery = supabaseAdmin
       .from("chats")
       .select("*")
-      .in("tenant_id", input.workspace_ids)
-      .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
-      .in("conversation_status", ["active", "waiting", "assigned"])
+      .in("tenant_id", input.workspace_ids);
+
+    if (isClosedView) {
+      fallbackQuery = fallbackQuery.or("conversation_mode.eq.closed,conversation_status.eq.closed");
+    } else {
+      fallbackQuery = fallbackQuery
+        .in("conversation_mode", ["handoff_pending", "agent_active", "copilot", "ai_only", "returned_to_ai"])
+        .in("conversation_status", ["active", "waiting", "assigned"]);
+    }
+
+    const fallback = await fallbackQuery
       .order("last_message_at", { ascending: false })
       .limit(400);
 
@@ -811,6 +834,10 @@ export async function listAgentInboxConversations(input: {
   });
 
   const visibleConversations = conversationsWithStatus.filter((conversation) => {
+    if (isClosedView) {
+      return true;
+    }
+
     if (conversation.conversation_mode !== "ai_only" && conversation.conversation_mode !== "returned_to_ai") {
       return true;
     }
@@ -828,6 +855,12 @@ export async function listAgentInboxConversations(input: {
   });
 
   visibleConversations.sort((left, right) => {
+    if (isClosedView) {
+      const leftClosed = toUnixMs(left.closed_at) ?? toUnixMs(left.updated_at) ?? conversationPriorityTs(left);
+      const rightClosed = toUnixMs(right.closed_at) ?? toUnixMs(right.updated_at) ?? conversationPriorityTs(right);
+      return rightClosed - leftClosed;
+    }
+
     const leftWaiting = isConversationWaitingForAgent(left);
     const rightWaiting = isConversationWaitingForAgent(right);
     if (leftWaiting !== rightWaiting) {
@@ -862,7 +895,8 @@ export async function listAgentInboxConversations(input: {
     waiting_count: waitingCount,
     answered_count: answeredCount,
     high_waiting_count: highWaitingCount,
-    critical_waiting_count: criticalWaitingCount
+    critical_waiting_count: criticalWaitingCount,
+    closed_count: isClosedView ? visibleConversations.length : 0
   };
 }
 
@@ -1043,7 +1077,7 @@ async function enrichConversationsWithVisitorContact(
   });
 }
 
-export async function listWorkspaceSupervisors(workspaceId: string): Promise<Array<{
+export async function listWorkspaceNotificationRecipients(workspaceId: string): Promise<Array<{
   user_id: string;
   role: WorkspaceMemberRole;
 }>> {
@@ -1052,10 +1086,10 @@ export async function listWorkspaceSupervisors(workspaceId: string): Promise<Arr
     .select("user_id, role")
     .eq("workspace_id", workspaceId)
     .eq("is_active", true)
-    .in("role", ["owner", "admin", "supervisor"]);
+    .in("role", ["owner", "admin"]);
 
   if (error) {
-    throw new HttpError(500, `Failed to list workspace supervisors: ${error.message}`);
+    throw new HttpError(500, `Failed to list workspace notification recipients: ${error.message}`);
   }
 
   return (data ?? []) as Array<{ user_id: string; role: WorkspaceMemberRole }>;

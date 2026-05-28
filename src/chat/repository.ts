@@ -33,7 +33,7 @@ export type ConversationCsat = {
   workspace_id: string | null;
   rating: number;
   feedback: string | null;
-  submitted_by: "visitor" | "agent" | "supervisor" | "system";
+  submitted_by: "visitor" | "agent" | "system";
   submitted_at: string;
   created_at: string;
   updated_at: string;
@@ -60,7 +60,9 @@ function isMissingResponseStateColumnError(error: { code?: string | null; messag
     message.includes("last_visitor_message_at") ||
     message.includes("last_visitor_typing_at") ||
     message.includes("last_agent_typing_at") ||
-    message.includes("last_visitor_activity_at");
+    message.includes("last_visitor_activity_at") ||
+    message.includes("visitor_inactivity_warning_sent_at") ||
+    message.includes("visitor_inactivity_close_due_at");
 
   if (!referencesResponseStateColumns) {
     return false;
@@ -191,6 +193,8 @@ export async function insertChatMessage(input: {
       last_external_message_at: string;
       last_visitor_message_at?: string;
       last_visitor_activity_at?: string;
+      visitor_inactivity_warning_sent_at?: string | null;
+      visitor_inactivity_close_due_at?: string | null;
       updated_at: string;
     } = {
       awaiting_agent_reply: externalSenderType === "visitor",
@@ -198,6 +202,9 @@ export async function insertChatMessage(input: {
       last_external_message_at: data.created_at,
       updated_at: nowIso
     };
+
+    chatUpdatePayload.visitor_inactivity_warning_sent_at = null;
+    chatUpdatePayload.visitor_inactivity_close_due_at = null;
 
     if (externalSenderType === "visitor") {
       chatUpdatePayload.last_visitor_message_at = data.created_at;
@@ -443,6 +450,8 @@ export async function updateChatMode(
     last_visitor_typing_at?: string | null;
     last_agent_typing_at?: string | null;
     last_visitor_activity_at?: string | null;
+    visitor_inactivity_warning_sent_at?: string | null;
+    visitor_inactivity_close_due_at?: string | null;
     archived_at?: string | null;
   }
 ): Promise<ChatThread> {
@@ -489,6 +498,8 @@ export async function updateChatFields(
     last_visitor_typing_at?: string | null;
     last_agent_typing_at?: string | null;
     last_visitor_activity_at?: string | null;
+    visitor_inactivity_warning_sent_at?: string | null;
+    visitor_inactivity_close_due_at?: string | null;
     archived_at?: string | null;
   }
 ): Promise<ChatThread> {
@@ -644,6 +655,41 @@ export async function listPendingHandoffChatsForSla(limit = 300): Promise<ChatTh
   return (data ?? []) as ChatThread[];
 }
 
+export async function listVisitorInactiveChatsForMaintenance(input: {
+  olderThan: string;
+  dueBefore: string;
+  workspaceIds?: string[];
+  limit?: number;
+}): Promise<ChatThread[]> {
+  let query = supabaseAdmin
+    .from("chats")
+    .select("*")
+    .in("conversation_mode", ["handoff_pending", "agent_active", "copilot"])
+    .in("conversation_status", ["active", "waiting", "assigned"])
+    .eq("last_external_sender_type", "agent")
+    .or(
+      [
+        `last_external_message_at.lte.${input.olderThan}`,
+        `last_visitor_message_at.lte.${input.olderThan}`,
+        `visitor_inactivity_close_due_at.lte.${input.dueBefore}`
+      ].join(",")
+    )
+    .order("last_message_at", { ascending: true })
+    .limit(input.limit ?? 300);
+
+  if (input.workspaceIds?.length) {
+    query = query.in("tenant_id", input.workspaceIds);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    throw new HttpError(500, `Failed to load visitor inactivity conversations: ${error.message}`);
+  }
+
+  return (data ?? []) as ChatThread[];
+}
+
 export async function getLatestUserMessage(chatId: string): Promise<ChatMessage | null> {
   const { data, error } = await supabaseAdmin
     .from("messages")
@@ -681,7 +727,7 @@ export async function upsertConversationCsat(input: {
   workspace_id?: string | null;
   rating: number;
   feedback?: string | null;
-  submitted_by?: "visitor" | "agent" | "supervisor" | "system";
+  submitted_by?: "visitor" | "agent" | "system";
 }): Promise<ConversationCsat> {
   const { data, error } = await supabaseAdmin
     .from("conversation_csat")
