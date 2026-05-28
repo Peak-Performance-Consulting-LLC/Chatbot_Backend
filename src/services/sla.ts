@@ -24,7 +24,7 @@ import {
   broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
 
-const VISITOR_INACTIVITY_WARNING_MS = 60 * 1000;
+const VISITOR_INACTIVITY_WARNING_MS = 60 * 5000;
 const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 60 * 1000;
 const VISITOR_INACTIVITY_WARNING_MESSAGE =
   "Due to inactivity, this conversation will be marked as closed in 1 minute. Please send a message if you still need help.";
