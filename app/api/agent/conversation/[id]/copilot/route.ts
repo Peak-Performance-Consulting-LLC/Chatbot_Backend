@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
 
 const copilotSchema = z.object({
   action: z.enum(["enable", "disable", "draft"]).default("draft"),
-  prompt: z.string().trim().min(1).max(4000).optional()
+  prompt: z.string().trim().min(1).max(4000).optional(),
+  visitor_message_id: z.string().trim().min(1).max(120).optional()
 });
 
 export async function OPTIONS(request: Request) {
@@ -109,7 +110,8 @@ export async function POST(
     const draft = await generateCopilotDraft({
       chatId,
       tenantId: chat.tenant_id,
-      prompt: parsed.data.prompt
+      guidance: parsed.data.prompt,
+      visitorMessageId: parsed.data.visitor_message_id
     });
 
     await writeAuditLog({

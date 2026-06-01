@@ -154,6 +154,23 @@ function looksLikeSitemapUrl(url: string) {
   return /\.xml($|[?#])/i.test(url) || /sitemap/i.test(url);
 }
 
+function getSitemapFetchCandidates(sitemapUrl: string): string[] {
+  const candidates = [sitemapUrl];
+
+  try {
+    const parsed = new URL(sitemapUrl);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    if (!/\.xml$/i.test(pathname) && /\/sitemap$/i.test(pathname)) {
+      parsed.pathname = `${pathname}.xml`;
+      candidates.push(parsed.toString());
+    }
+  } catch {
+    // The URL schema validation happens before ingestion; keep the original error path if parsing fails here.
+  }
+
+  return uniqueByValue(candidates);
+}
+
 function decodeXmlEntities(input: string) {
   return input
     .replace(/&amp;/g, "&")
@@ -175,9 +192,10 @@ function parseSitemapXml(xml: string) {
     .filter(Boolean);
 
   if (pageUrls.length > 0 || childSitemaps.length > 0) {
+    const nestedSitemapUrls = pageUrls.filter((value) => looksLikeSitemapUrl(value));
     return {
-      pageUrls: uniqueByValue(pageUrls),
-      childSitemaps: uniqueByValue(childSitemaps)
+      pageUrls: uniqueByValue(pageUrls.filter((value) => !looksLikeSitemapUrl(value))),
+      childSitemaps: uniqueByValue([...childSitemaps, ...nestedSitemapUrls])
     };
   }
 
@@ -202,7 +220,22 @@ async function fetchSitemapUrls(
 
   visited.add(sitemapUrl);
 
-  const { text: xml } = await fetchText(sitemapUrl);
+  let xml = "";
+  let lastError: unknown = null;
+  for (const candidate of getSitemapFetchCandidates(sitemapUrl)) {
+    try {
+      const fetched = await fetchText(candidate);
+      xml = fetched.text;
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (!xml) {
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Failed to fetch sitemap"));
+  }
+
   const parsed = parseSitemapXml(xml);
   const collected: string[] = [];
 
@@ -604,7 +637,36 @@ async function resolveSourcesToDocs(
   for (const source of resolvedSources) {
     if (source.source_type === "url") {
       const key = source.source_value.trim();
-      if (key && !urlSourceMap.has(key)) {
+      if (!key) {
+        continue;
+      }
+
+      if (looksLikeSitemapUrl(key)) {
+        if (seenSitemaps.has(key)) {
+          continue;
+        }
+        seenSitemaps.add(key);
+
+        try {
+          const sitemapUrls = await fetchSitemapUrls(key, maxSitemapUrls);
+          for (const pageUrl of sitemapUrls) {
+            const pageKey = pageUrl.trim();
+            if (pageKey && !urlSourceMap.has(pageKey)) {
+              urlSourceMap.set(pageKey, source);
+            }
+          }
+        } catch (error) {
+          errors.push(`Sitemap failed (${key}): ${error instanceof Error ? error.message : String(error)}`);
+          logError("platform_ingest_sitemap_failed", {
+            sitemap: key,
+            source_id: source.source_id ?? null,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        continue;
+      }
+
+      if (!urlSourceMap.has(key)) {
         urlSourceMap.set(key, source);
       }
       continue;

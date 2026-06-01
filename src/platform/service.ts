@@ -154,12 +154,27 @@ function shouldAutoIngestOnSourceUpdate(): boolean {
   return true;
 }
 
+function getEmbeddingKeyError(errors: string[]) {
+  return errors.find((error) =>
+    error.toLowerCase().includes("gemini_api_key") &&
+    error.toLowerCase().includes("flagged as leaked")
+  );
+}
+
 function summarizeIngestion(result: {
   inserted_chunks: number;
   fetched_documents: number;
   skipped_documents: number;
   errors: string[];
 }) {
+  const embeddingKeyError = getEmbeddingKeyError(result.errors);
+  if (embeddingKeyError) {
+    return {
+      status: "error" as const,
+      message: embeddingKeyError
+    };
+  }
+
   if (result.errors.length > 0 && result.inserted_chunks === 0) {
     return {
       status: "error" as const,
