@@ -86,7 +86,7 @@ function normalizeSupportedServices(input: unknown): Array<"flights" | "hotels" 
   }
 
   if (values.size === 0) {
-    values.add("flights");
+    return [];
   }
 
   return Array.from(values);

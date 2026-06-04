@@ -11,6 +11,28 @@ const widgetConfigQuerySchema = z.object({
   tenant_id: z.string().trim().min(2).max(80)
 });
 
+function sanitizeWelcomeMessage(message: string) {
+  const normalized = message.toLowerCase();
+  const mentionsDealAvailability =
+    (
+      normalized.includes("deal") &&
+      (normalized.includes("flight") || normalized.includes("hotel") || normalized.includes("booking"))
+    ) ||
+    normalized.includes("hotel and flight deals are not shown");
+
+  return mentionsDealAvailability ? "Welcome. How can I help today?" : message;
+}
+
+function sanitizeInitialQuickReplies(replies: string[]) {
+  const neutralReplies = ["I have a question", "Contact support"];
+  const hasDealReply = replies.some((reply) => {
+    const normalized = reply.toLowerCase();
+    return normalized.includes("deal") && (normalized.includes("flight") || normalized.includes("hotel"));
+  });
+
+  return hasDealReply ? neutralReplies : replies;
+}
+
 export async function OPTIONS(request: Request) {
   return optionsCorsResponse(request);
 }
@@ -58,13 +80,13 @@ export async function GET(request: Request) {
         windowHeight: tenant.window_height,
         borderRadius: tenant.border_radius,
         botName: tenant.bot_name,
-        welcomeMessage: tenant.welcome_message,
+        welcomeMessage: sanitizeWelcomeMessage(tenant.welcome_message),
         botAvatarUrl: tenant.bot_avatar_url || undefined,
-        quickReplies: tenant.quick_replies,
+        quickReplies: sanitizeInitialQuickReplies(tenant.quick_replies),
         notifEnabled: tenant.notif_enabled,
         notifText: tenant.notif_text,
         notifAnimation: tenant.notif_animation,
-        notifChips: tenant.notif_chips,
+        notifChips: sanitizeInitialQuickReplies(tenant.notif_chips),
         csatEnabled: tenant.csat_enabled,
         csatPrompt: tenant.csat_prompt
       },

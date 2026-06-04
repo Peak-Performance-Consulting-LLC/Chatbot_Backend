@@ -289,7 +289,7 @@ export type WorkspaceInvitationRecord = {
 };
 
 function normalizeSupportedServices(input?: string[] | null): SupportedService[] {
-  if (!Array.isArray(input) || input.length === 0) {
+  if (!Array.isArray(input)) {
     return [...defaultServices];
   }
 
@@ -302,7 +302,7 @@ function normalizeSupportedServices(input?: string[] | null): SupportedService[]
   }
 
   if (values.size === 0) {
-    values.add("flights");
+    return [];
   }
 
   return Array.from(values);
@@ -324,6 +324,10 @@ function formatSupportedServices(services: SupportedService[]): string {
 
   if (labels.length === 1) {
     return labels[0] ?? "travel support";
+  }
+
+  if (labels.length === 0) {
+    return "website support";
   }
 
   if (labels.length === 2) {

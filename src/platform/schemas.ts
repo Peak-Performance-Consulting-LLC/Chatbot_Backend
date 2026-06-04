@@ -78,7 +78,7 @@ export const platformTenantParamSchema = z.object({
 export const platformTenantProfileSchema = z.object({
   tenant_id: z.string().trim().min(2).max(80),
   business_type: z.string().trim().min(2).max(80).optional(),
-  supported_services: z.array(supportedServiceSchema).min(1).max(4).optional(),
+  supported_services: z.array(supportedServiceSchema).max(4).optional(),
   support_phone: z.string().trim().min(7).max(40).optional(),
   support_email: z.string().trim().email().max(160).optional(),
   support_cta_label: z.string().trim().min(3).max(80).optional(),

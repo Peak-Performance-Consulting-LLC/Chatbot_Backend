@@ -1,38 +1,16 @@
 import { insertChatMessage, touchChatThread } from "@/chat/repository";
 import { getTenantById } from "@/tenants/verifyTenant";
 
-function formatSupportedServices(services: Array<"flights" | "hotels" | "cars" | "cruises">) {
-  const labels = services.map((service) => {
-    if (service === "cars") {
-      return "car rentals";
-    }
-    if (service === "cruises") {
-      return "cruises";
-    }
-    if (service === "hotels") {
-      return "hotel stays";
-    }
-    return "live flight deals";
-  });
-
-  if (labels.length === 0) {
-    return "travel support";
-  }
-
-  if (labels.length === 1) {
-    return labels[0] ?? "travel support";
-  }
-
-  if (labels.length === 2) {
-    return `${labels[0]} and ${labels[1]}`;
-  }
-
-  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
-}
-
 const FALLBACK_OPENING_MESSAGE =
-  "Welcome to AeroConcierge. I can help with live flight deals and travel support for this website. " +
-  "You can type naturally, or use the guided planner to search step by step.";
+  "Welcome to AeroConcierge. How can I help today?";
+
+function isDealAvailabilityWelcome(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("deal") &&
+    (normalized.includes("flight") || normalized.includes("hotel") || normalized.includes("booking"))
+  ) || normalized.includes("hotel and flight deals are not shown");
+}
 
 async function resolveOpeningMessage(tenantId?: string) {
   if (!tenantId) {
@@ -42,11 +20,11 @@ async function resolveOpeningMessage(tenantId?: string) {
   try {
     const tenant = await getTenantById(tenantId);
     const welcome = tenant.welcome_message?.trim();
-    if (welcome) {
+    if (welcome && !isDealAvailabilityWelcome(welcome)) {
       return welcome;
     }
 
-    return `Welcome to ${tenant.name || tenant.bot_name}. I can help with ${formatSupportedServices(tenant.supported_services)} and support questions from this website.`;
+    return `Welcome to ${tenant.name || tenant.bot_name}. How can I help today?`;
   } catch {
     return FALLBACK_OPENING_MESSAGE;
   }

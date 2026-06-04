@@ -71,7 +71,18 @@ const interruptionKeywords = [
   "what",
   "why",
   "tell me",
-  "about"
+  "about",
+  "deal",
+  "deals",
+  "booking",
+  "book",
+  "find",
+  "search",
+  "guide",
+  "hotel",
+  "hotels",
+  "flight",
+  "flights"
 ];
 
 function isLikelyInterruptionText(text: string): boolean {

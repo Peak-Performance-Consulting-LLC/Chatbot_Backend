@@ -124,14 +124,14 @@ export function generateGreetingReply(input: {
 }): { text: string; metadata: MessageMetadata } {
   const isGratitude = isSimpleGratitude(input.message);
   const text = isGratitude
-    ? "You're welcome. I can help with travel planning or support questions whenever you're ready."
-    : "Hello. I can help with travel planning, flight deals, and website support. What would you like to do?";
+    ? "You're welcome. I can help whenever you're ready."
+    : "Hello. How can I help today?";
 
   return {
     text,
     metadata: {
       call_cta: input.callCta,
-      quick_replies: buildServicesQuickReplies(input.enabledServices)
+      quick_replies: ["I have a question", input.callCta.label]
     }
   };
 }

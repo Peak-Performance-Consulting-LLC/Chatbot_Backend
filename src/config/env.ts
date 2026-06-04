@@ -31,6 +31,7 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().default(""),
   SUPABASE_SERVICE_ROLE_KEY: z.string().default(""),
   FLIGHT_SEARCH_URL: z.string().default("https://serp-api-olive.vercel.app/api/flights/search"),
+  HOTEL_SEARCH_URL: z.string().default("https://serp-api-olive.vercel.app/api/hotels/search"),
   FLIGHT_PLACE_SUGGESTIONS_URL: z
     .string()
     .default("https://serp-api-olive.vercel.app/api/flights/place-suggestions"),

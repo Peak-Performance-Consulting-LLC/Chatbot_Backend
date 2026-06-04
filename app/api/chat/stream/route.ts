@@ -49,11 +49,12 @@ import {
 } from "@/travel/format";
 import {
   detectServiceIntent,
+  detectRequestedService,
   detectServiceRestartIntent,
   detectServiceUpdateIntent
 } from "@/travel/intent";
 import { applyUserMessageToServiceState, getNextServiceSlot } from "@/travel/slotFilling";
-import { completeServiceState, upsertServiceState } from "@/travel/stateStore";
+import { completeServiceState, getServiceState, upsertServiceState } from "@/travel/stateStore";
 import type { TravelService, TravelServiceState } from "@/travel/types";
 
 export const runtime = "nodejs";
@@ -74,6 +75,10 @@ const CONTACT_CAPTURE_FIELDS: Array<"name" | "email" | "phone"> = ["name", "emai
 
 function isFlightStateActive(state: FlightSearchState | null) {
   return Boolean(state && state.status !== "done" && state.status !== "completed");
+}
+
+function isServiceStateActive(state: TravelServiceState | null) {
+  return Boolean(state && state.status !== "completed");
 }
 
 function stableHash(input: string) {
@@ -166,14 +171,14 @@ function buildGreetingReply(input: {
 }): { text: string; metadata: MessageMetadata } {
   const isGratitude = isSimpleGratitude(input.message);
   const text = isGratitude
-    ? "You're welcome. I can help with travel planning or support questions whenever you're ready."
-    : "Hello. I can help with travel planning, flight deals, and website support. What would you like to do?";
+    ? "You're welcome. I can help whenever you're ready."
+    : "Hello. How can I help today?";
 
   return {
     text,
     metadata: {
       call_cta: input.callCta,
-      quick_replies: buildServicesQuickReplies(input.enabledServices)
+      quick_replies: ["I have a question", input.callCta.label]
     }
   };
 }
@@ -213,6 +218,34 @@ function buildNoKnowledgeMessage(callCta: CallCta) {
       no_rag_match: true,
       call_cta: callCta
     } as MessageMetadata
+  };
+}
+
+function buildUnsupportedDealsMessage(input: {
+  requested: "flights" | "hotels";
+  enabledServices: TravelService[];
+  callCta: CallCta;
+}): { text: string; metadata: MessageMetadata } {
+  const enabledDealLabels = [
+    input.enabledServices.includes("flights") ? "flight deals" : null,
+    input.enabledServices.includes("hotels") ? "hotel deals" : null
+  ].filter(Boolean);
+
+  const text =
+    enabledDealLabels.length > 0
+      ? `${
+          input.requested === "flights" ? "Flight deals are" : "Hotel deals are"
+        } not enabled for this website. I can help with ${enabledDealLabels.join(" and ")} or support questions.`
+      : "This website is not configured for hotel or flight deals, so I won't show travel deals here. I can still help with support questions from this website.";
+
+  return {
+    text,
+    metadata: {
+      call_cta: input.callCta,
+      quick_replies: buildServicesQuickReplies(input.enabledServices),
+      deals_disabled: true,
+      requested_service: input.requested
+    }
   };
 }
 
@@ -467,7 +500,7 @@ async function produceServiceReply(input: {
 
   await completeServiceState(input.chatId, input.tenantId, state);
 
-  const completed = buildServiceCompletedMessage({
+  const completed = await buildServiceCompletedMessage({
     state,
     callCta: input.callCta
   });
@@ -782,14 +815,33 @@ export async function POST(request: Request) {
       });
     }
 
-    // Run flight state lookup concurrently with intent detection prep
-    const currentFlightState = await getFlightState(chatId);
+    // Run active booking state lookups concurrently with intent detection prep.
+    const [currentFlightState, rawServiceState] = await Promise.all([
+      getFlightState(chatId),
+      getServiceState(chatId)
+    ]);
+    const currentServiceState =
+      rawServiceState && tenant.supported_services.includes(rawServiceState.service)
+        ? rawServiceState
+        : null;
+    const flightRequested = detectFlightIntent(input.message);
+    const detectedService = detectServiceIntent(input.message, tenant.supported_services);
+    const requestedService = detectRequestedService(input.message);
+    const unsupportedFlightRequest = flightRequested && !tenant.supported_services.includes("flights");
+    const unsupportedServiceRequest =
+      requestedService &&
+      requestedService === "hotels" &&
+      !tenant.supported_services.includes(requestedService);
     const requestIntent: MessageIntent = aiIsSimpleGreeting(input.message) || aiIsSimpleGratitude(input.message)
       ? "greeting"
       : detectPaymentIntent(input.message)
       ? "payment_support"
-      : detectFlightIntent(input.message) || isFlightStateActive(currentFlightState)
+      : unsupportedFlightRequest || unsupportedServiceRequest
+        ? "support"
+      : flightRequested || isFlightStateActive(currentFlightState)
         ? "flight_search"
+      : detectedService || isServiceStateActive(currentServiceState)
+        ? "service_request"
         : "knowledge";
 
     // Fire user message insert without blocking the stream start
@@ -829,9 +881,20 @@ export async function POST(request: Request) {
       const responseStartedAt = Date.now();
 
       try {
+        const isUnsupportedDealRequest = unsupportedFlightRequest || unsupportedServiceRequest;
         const isFlight = requestIntent === "flight_search";
 
-        if (isFlight) {
+        if (isUnsupportedDealRequest) {
+          assistantIntent = "support";
+          const unsupported = buildUnsupportedDealsMessage({
+            requested: unsupportedFlightRequest ? "flights" : "hotels",
+            enabledServices: tenant.supported_services,
+            callCta
+          });
+          assistantText = unsupported.text;
+          assistantMetadata = unsupported.metadata;
+          streamTextInChunks(assistantText, writer.token);
+        } else if (isFlight) {
           assistantIntent = "flight_search";
           responseService = "flights";
           const response = await produceFlightReply({
@@ -847,6 +910,20 @@ export async function POST(request: Request) {
           assistantMetadata = response.metadata ?? null;
           responseSource = response.responseSource;
           hadResponseError = response.responseSource === "fallback";
+        } else if (requestIntent === "service_request") {
+          assistantIntent = "service_request";
+          const service = await produceServiceReply({
+            chatId,
+            tenantId: input.tenant_id,
+            userMessage: input.message,
+            enabledServices: tenant.supported_services,
+            callCta,
+            state: currentServiceState,
+            writeToken: writer.token
+          });
+          assistantText = service.text;
+          assistantMetadata = service.metadata;
+          responseService = service.metadata.service_request?.service ?? service.metadata.service_ui?.service ?? null;
         } else if (requestIntent === "payment_support") {
           assistantIntent = "payment_support";
           const payment = aiGeneratePaymentReply(callCta);
