@@ -56,13 +56,16 @@ export async function GET(request: Request) {
     }
 
     const tenant = await assertTenantDomainAccess(request, parsed.data.tenant_id);
-    const liveSupport = await getWorkspaceLiveSupportAvailability(tenant.tenant_id).catch(() => ({
-      availability: "offline" as const,
-      online_count: 0,
-      busy_count: 0,
-      away_count: 0,
-      updated_at: new Date().toISOString()
-    }));
+    const liveSupport = await getWorkspaceLiveSupportAvailability(tenant.tenant_id).catch((error) => {
+      console.error("Failed to load live support availability", error);
+      return {
+        availability: "unknown" as const,
+        online_count: 0,
+        busy_count: 0,
+        away_count: 0,
+        updated_at: new Date().toISOString()
+      };
+    });
 
     return jsonCorsResponse(request, {
       tenant_id: tenant.tenant_id,
