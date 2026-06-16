@@ -1,11 +1,132 @@
 import { getEnv } from "@/config/env";
 import { optionsCorsResponse } from "@/lib/cors";
+import { getTenantById } from "@/tenants/verifyTenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function ensureBaseUrl(url: string): string {
   return url.replace(/\/$/, "");
+}
+
+type EmbedAppearance = {
+  primaryColor: string;
+  userBubbleColor: string;
+  botBubbleColor: string;
+  fontFamily: string;
+  widgetPosition: "left" | "right";
+  launcherStyle: "rounded" | "pill" | "square" | "minimal";
+  themeStyle: "standard" | "glass" | "clay" | "dark" | "minimal";
+  bgPattern: "none" | "dots" | "grid" | "waves";
+  launcherIcon: "chat" | "sparkle" | "headset" | "zap" | "heart";
+  windowWidth: number;
+  windowHeight: number;
+  borderRadius: number;
+  botName: string;
+  welcomeMessage: string;
+  botAvatarUrl: string;
+  quickReplies: string[];
+  notifEnabled: boolean;
+  notifText: string;
+  notifAnimation: "bounce" | "pulse" | "slide";
+  notifChips: string[];
+  supportPhone: string;
+  supportCtaLabel: string;
+  headerCtaLabel: string;
+  headerCtaNotice: string;
+};
+
+const fallbackAppearance: EmbedAppearance = {
+  primaryColor: "#006d77",
+  userBubbleColor: "#006d77",
+  botBubbleColor: "#edf6f9",
+  fontFamily: "Manrope",
+  widgetPosition: "right",
+  launcherStyle: "rounded",
+  themeStyle: "standard",
+  bgPattern: "none",
+  launcherIcon: "chat",
+  windowWidth: 440,
+  windowHeight: 760,
+  borderRadius: 18,
+  botName: "AeroConcierge",
+  welcomeMessage: "Welcome. How can I help today?",
+  botAvatarUrl: "",
+  quickReplies: ["How does this work?", "Pricing plans", "Get support"],
+  notifEnabled: true,
+  notifText: "Need help?",
+  notifAnimation: "bounce",
+  notifChips: ["I have a question", "Tell me more"],
+  supportPhone: "",
+  supportCtaLabel: "Connect with a specialist",
+  headerCtaLabel: "",
+  headerCtaNotice: "Hi! I am your AI assistant. Ask me anything about your trip."
+};
+
+function appendAppearanceParams(params: URLSearchParams, appearance: EmbedAppearance) {
+  params.set("primary_color", appearance.primaryColor);
+  params.set("user_bubble_color", appearance.userBubbleColor);
+  params.set("bot_bubble_color", appearance.botBubbleColor);
+  params.set("font_family", appearance.fontFamily);
+  params.set("widget_position", appearance.widgetPosition);
+  params.set("launcher_style", appearance.launcherStyle);
+  params.set("theme_style", appearance.themeStyle);
+  params.set("bg_pattern", appearance.bgPattern);
+  params.set("launcher_icon", appearance.launcherIcon);
+  params.set("window_width", String(appearance.windowWidth));
+  params.set("window_height", String(appearance.windowHeight));
+  params.set("border_radius", String(appearance.borderRadius));
+  params.set("bot_name", appearance.botName);
+  params.set("welcome_message", appearance.welcomeMessage);
+  if (appearance.botAvatarUrl) params.set("avatar_url", appearance.botAvatarUrl);
+  if (!appearance.notifEnabled) params.set("notif_enabled", "0");
+  params.set("notif_text", appearance.notifText);
+  params.set("notif_animation", appearance.notifAnimation);
+  for (const reply of appearance.quickReplies.slice(0, 6)) {
+    params.append("quick_reply", reply);
+  }
+  for (const chip of appearance.notifChips.slice(0, 4)) {
+    params.append("notif_chip", chip);
+  }
+  if (appearance.supportPhone) params.set("support_phone", appearance.supportPhone);
+  params.set("support_cta_label", appearance.supportCtaLabel);
+  params.set("header_cta_label", appearance.headerCtaLabel);
+  params.set("header_cta_notice", appearance.headerCtaNotice);
+}
+
+async function getEmbedAppearance(tenantId: string): Promise<EmbedAppearance> {
+  try {
+    const tenant = await getTenantById(tenantId);
+    return {
+      primaryColor: tenant.primary_color,
+      userBubbleColor: tenant.user_bubble_color,
+      botBubbleColor: tenant.bot_bubble_color,
+      fontFamily: tenant.font_family,
+      widgetPosition: tenant.widget_position,
+      launcherStyle: tenant.launcher_style,
+      themeStyle: tenant.theme_style,
+      bgPattern: tenant.bg_pattern,
+      launcherIcon: tenant.launcher_icon,
+      windowWidth: tenant.window_width,
+      windowHeight: tenant.window_height,
+      borderRadius: tenant.border_radius,
+      botName: tenant.bot_name,
+      welcomeMessage: tenant.welcome_message,
+      botAvatarUrl: tenant.bot_avatar_url || "",
+      quickReplies: tenant.quick_replies,
+      notifEnabled: tenant.notif_enabled,
+      notifText: tenant.notif_text,
+      notifAnimation: tenant.notif_animation,
+      notifChips: tenant.notif_chips,
+      supportPhone: tenant.support_phone || "",
+      supportCtaLabel: tenant.support_cta_label,
+      headerCtaLabel: tenant.header_cta_label,
+      headerCtaNotice: tenant.header_cta_notice
+    };
+  } catch (error) {
+    console.error("Failed to load tenant appearance for embed script", error);
+    return fallbackAppearance;
+  }
 }
 
 export async function OPTIONS(request: Request) {
@@ -22,27 +143,31 @@ export async function GET(request: Request) {
   const env = getEnv();
   const widgetHostUrl = ensureBaseUrl(env.WIDGET_HOST_URL);
   const backendUrl = ensureBaseUrl(env.BACKEND_PUBLIC_URL);
+  const appearance = await getEmbedAppearance(tenantId);
 
   const params = new URLSearchParams({
     embed: "1",
     tenant_id: tenantId,
     backend_url: backendUrl
   });
+  appendAppearanceParams(params, appearance);
   const embedUrl = `${widgetHostUrl}/?${params.toString()}`;
   const widgetOrigin = new URL(widgetHostUrl).origin;
+  const initialLayout = {
+    widgetPosition: appearance.widgetPosition,
+    launcherStyle: appearance.launcherStyle,
+    launcherIconOnly: true,
+    botName: appearance.botName,
+    windowWidth: Math.max(appearance.windowWidth, 520),
+    windowHeight: Math.max(appearance.windowHeight, 820),
+    borderRadius: appearance.borderRadius
+  };
+  const initialMode = appearance.notifEnabled ? "peek" : "launcher";
 
   const js = `(function () {
   var widgetOrigin = ${JSON.stringify(widgetOrigin)};
-  var layout = {
-    widgetPosition: 'right',
-    launcherStyle: 'rounded',
-    launcherIconOnly: true,
-    botName: 'Chat with us',
-    windowWidth: 520,
-    windowHeight: 820,
-    borderRadius: 18
-  };
-  var activeMode = 'launcher';
+  var layout = ${JSON.stringify(initialLayout)};
+  var activeMode = ${JSON.stringify(initialMode)};
   var iframe = document.createElement('iframe');
   iframe.src = ${JSON.stringify(embedUrl)};
   iframe.title = 'Chat widget';
@@ -204,7 +329,7 @@ export async function GET(request: Request) {
     }
   });
 
-  applyState('launcher');
+  applyState(activeMode);
   document.body.appendChild(iframe);
   document.body.appendChild(hoverZone);
 
@@ -260,7 +385,9 @@ export async function GET(request: Request) {
     status: 200,
     headers: {
       "Content-Type": "application/javascript; charset=utf-8",
-      "Cache-Control": "public, max-age=300, s-maxage=300",
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
       "Access-Control-Allow-Origin": "*"
     }
   });
