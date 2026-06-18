@@ -4,10 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "node scripts/startDev.mjs",
-    "build": "rm -rf .next && next build",
+    "build": "node -e \"const fs=require('fs');fs.rmSync('.next',{recursive:true,force:true})\" && next build",
     "start": "node scripts/startServer.mjs --prod",
     "lint": "next lint",
-    "typecheck": "rm -rf .next tsconfig.tsbuildinfo && tsc --noEmit",
+    "typecheck": "node -e \"const fs=require('fs');fs.rmSync('.next',{recursive:true,force:true});fs.rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc --noEmit",
     "doctor": "tsx scripts/doctor.ts",
     "ingest": "tsx scripts/ingest.ts"
   },

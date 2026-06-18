@@ -117,14 +117,66 @@ function isLeakedEmbeddingKeyError(error: unknown) {
   return error.message.toLowerCase().includes(LEAKED_API_KEY_PHRASE);
 }
 
+function getUrlHostname(url: string) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function getFetchCause(error: Error) {
+  const cause = (error as Error & { cause?: unknown }).cause;
+  return cause && typeof cause === "object" ? (cause as Record<string, unknown>) : null;
+}
+
+function formatFetchError(url: string, error: unknown) {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const hostname = getUrlHostname(url);
+  const cause = getFetchCause(error);
+  const code = typeof cause?.code === "string" ? cause.code : "";
+  const causeMessage = typeof cause?.message === "string" ? cause.message : "";
+
+  if (code === "ENOTFOUND") {
+    return `DNS lookup failed for ${hostname}`;
+  }
+
+  if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") {
+    return `Connection to ${hostname} timed out`;
+  }
+
+  if (code === "ECONNREFUSED") {
+    return `Connection refused by ${hostname}`;
+  }
+
+  if (code === "ECONNRESET") {
+    return `Connection reset by ${hostname}`;
+  }
+
+  if (causeMessage && error.message === "fetch failed") {
+    return causeMessage;
+  }
+
+  return error.message;
+}
+
 async function fetchText(url: string): Promise<FetchTextResult> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "AeroConciergeIngest/1.0",
-      Accept:
-        "text/html,application/xhtml+xml,text/plain,text/markdown,application/xml,text/xml,application/json,*/*"
-    }
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      headers: {
+        "User-Agent": "AeroConciergeIngest/1.0",
+        Accept:
+          "text/html,application/xhtml+xml,text/plain,text/markdown,application/xml,text/xml,application/json,*/*"
+      }
+    });
+  } catch (error) {
+    throw new Error(formatFetchError(url, error));
+  }
 
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
