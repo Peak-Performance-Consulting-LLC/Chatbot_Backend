@@ -32,6 +32,7 @@ export async function POST(request: Request) {
     const result = await createPlatformWorkspace({
       token,
       company_name: parsed.data.company_name,
+      setup_mode: parsed.data.setup_mode,
       website_url: parsed.data.website_url,
       sitemap_url: parsed.data.sitemap_url,
       faq_text: parsed.data.faq_text,

@@ -683,8 +683,8 @@ async function tenantExists(tenantId: string): Promise<boolean> {
   return Boolean(data?.tenant_id);
 }
 
-async function generateTenantId(companyName: string, domain: string): Promise<string> {
-  const seed = slugify(companyName) || slugify(domain.split(".")[0] ?? "") || "tenant";
+async function generateTenantId(companyName: string, domain?: string): Promise<string> {
+  const seed = slugify(companyName) || slugify(domain?.split(".")[0] ?? "") || "tenant";
   let candidate = seed;
   let counter = 1;
 
@@ -1061,18 +1061,20 @@ export async function resolvePlatformSession(
 export async function createTenantForUser(input: {
   userId: string;
   companyName: string;
-  domain: string;
+  domain?: string;
   businessProfile?: Partial<TenantBusinessProfile>;
 }): Promise<{ tenant_id: string; name: string; allowed_domains: string[]; business_profile: TenantBusinessProfile }> {
-  const domain = normalizeDomain(input.domain);
-  const allowedDomains = buildAllowedDomains(domain);
+  const domain = input.domain?.trim() ? normalizeDomain(input.domain) : "";
+  const allowedDomains = domain ? buildAllowedDomains(domain) : [];
   const businessProfile = normalizeBusinessProfile(input.businessProfile, {
     companyName: input.companyName
   });
 
-  const existingTenantId = await findTenantConflictByAllowedDomains(allowedDomains);
-  if (existingTenantId) {
-    throw new HttpError(409, "This domain is already connected to another tenant");
+  if (allowedDomains.length > 0) {
+    const existingTenantId = await findTenantConflictByAllowedDomains(allowedDomains);
+    if (existingTenantId) {
+      throw new HttpError(409, "This domain is already connected to another tenant");
+    }
   }
 
   const tenantId = await generateTenantId(input.companyName, domain);
@@ -1089,7 +1091,9 @@ export async function createTenantForUser(input: {
     header_cta_notice: businessProfile.header_cta_notice,
     business_description: businessProfile.business_description,
     knowledge_status: "pending",
-    knowledge_message: "Knowledge base ingestion will begin as soon as the initial website sources are processed.",
+    knowledge_message: allowedDomains.length > 0
+      ? "Knowledge base ingestion will begin as soon as the initial website sources are processed."
+      : "Add your website domain and content sources in Setup & Content to start building the knowledge base.",
     knowledge_last_ingested_at: null,
     primary_color: businessProfile.primary_color,
     user_bubble_color: businessProfile.user_bubble_color,

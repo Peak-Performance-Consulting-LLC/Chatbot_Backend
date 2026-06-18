@@ -115,19 +115,30 @@ export const platformTenantDomainSchema = z.object({
   website_url: urlSchema
 });
 
-export const platformCreateWorkspaceSchema = z.object({
-  company_name: z.string().trim().min(2).max(120),
-  website_url: urlSchema,
-  sitemap_url: urlSchema.optional(),
-  faq_text: z.string().trim().max(20000).optional(),
-  doc_urls: z.array(urlSchema).max(30).optional(),
-  business_type: z.string().trim().min(2).max(80).optional(),
-  supported_services: z.array(supportedServiceSchema).min(1).max(4).optional(),
-  support_phone: z.string().trim().min(7).max(40).optional(),
-  support_email: z.string().trim().email().max(160).optional(),
-  support_cta_label: z.string().trim().min(3).max(80).optional(),
-  business_description: z.string().trim().max(1000).optional()
-});
+export const platformCreateWorkspaceSchema = z
+  .object({
+    company_name: z.string().trim().min(2).max(120),
+    setup_mode: z.enum(["seeded", "scratch"]).optional().default("seeded"),
+    website_url: optionalUrlSchema,
+    sitemap_url: optionalUrlSchema,
+    faq_text: z.string().trim().max(20000).optional(),
+    doc_urls: z.array(urlSchema).max(30).optional(),
+    business_type: z.string().trim().min(2).max(80).optional(),
+    supported_services: z.array(supportedServiceSchema).min(1).max(4).optional(),
+    support_phone: z.string().trim().min(7).max(40).optional(),
+    support_email: z.string().trim().email().max(160).optional(),
+    support_cta_label: z.string().trim().min(3).max(80).optional(),
+    business_description: z.string().trim().max(1000).optional()
+  })
+  .superRefine((value, ctx) => {
+    if (value.setup_mode !== "scratch" && !value.website_url) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["website_url"],
+        message: "Website URL is required unless you start from scratch."
+      });
+    }
+  });
 
 export const platformTenantSourcesQuerySchema = z.object({
   tenant_id: z.string().trim().min(2).max(80)

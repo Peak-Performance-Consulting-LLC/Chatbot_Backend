@@ -279,7 +279,7 @@ async function runProvisioningIngest(input: {
   if (input.sources.length === 0) {
     await updateTenantKnowledgeState(input.tenantId, {
       status: "pending",
-      message: "Add a website, sitemap, FAQ, or document source to start building the knowledge base.",
+      message: input.pendingMessage ?? "Add a website, sitemap, FAQ, or document source to start building the knowledge base.",
       last_ingested_at: null
     });
 
@@ -453,7 +453,8 @@ export async function signupPlatformTenant(input: {
 export async function createPlatformWorkspace(input: {
   token: string;
   company_name: string;
-  website_url: string;
+  setup_mode?: "seeded" | "scratch";
+  website_url?: string;
   sitemap_url?: string;
   faq_text?: string;
   doc_urls?: string[];
@@ -465,6 +466,43 @@ export async function createPlatformWorkspace(input: {
   business_description?: string;
 }) {
   const user = await resolvePlatformSession(input.token);
+  const setupMode = input.setup_mode ?? "seeded";
+
+  if (setupMode === "scratch") {
+    await enforcePlanLimits(user.id, "create_tenant");
+
+    const tenant = await createTenantForUser({
+      userId: user.id,
+      companyName: input.company_name,
+      businessProfile: {
+        business_type: input.business_type ?? "general",
+        supported_services: input.supported_services ?? [],
+        support_phone: input.support_phone,
+        support_email: input.support_email,
+        support_cta_label: input.support_cta_label,
+        business_description: input.business_description
+      }
+    });
+
+    const ingest = await runProvisioningIngest({
+      tenantId: tenant.tenant_id,
+      sources: [],
+      shouldAutoIngest: false,
+      pendingMessage: "Project created. Add a website domain and content sources in Setup & Content to build the chatbot knowledge base."
+    });
+
+    const latestTenant = await getOwnedTenantSummary(user.id, tenant.tenant_id);
+
+    return {
+      tenant: toPlatformTenant(latestTenant),
+      ingest
+    };
+  }
+
+  if (!input.website_url?.trim()) {
+    throw new HttpError(400, "Website URL is required unless you start from scratch.");
+  }
+
   const website = normalizeWebsiteUrl(input.website_url);
   const domain = website.hostname.toLowerCase();
 
