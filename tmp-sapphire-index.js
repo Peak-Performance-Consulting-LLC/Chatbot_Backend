@@ -19382,7 +19382,7 @@ const po = "+1(877)587-4339",
   UT = new URLSearchParams({
     embed: "1",
     tenant_id: "sapphire-travels",
-    backend_url: "https://chatbot-backend-theta-two.vercel.app",
+    backend_url: "https://chat.ppconsultings.com",
     support_phone: po,
     support_cta_label: "Connect",
     header_cta_label: "New",
