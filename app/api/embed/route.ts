@@ -96,7 +96,7 @@ function appendAppearanceParams(params: URLSearchParams, appearance: EmbedAppear
 
 async function getEmbedAppearance(tenantId: string): Promise<EmbedAppearance> {
   try {
-    const tenant = await getTenantById(tenantId);
+    const tenant = await getTenantById(tenantId, { fresh: true });
     return {
       primaryColor: tenant.primary_color,
       userBubbleColor: tenant.user_bubble_color,
@@ -168,6 +168,7 @@ export async function GET(request: Request) {
   var widgetOrigin = ${JSON.stringify(widgetOrigin)};
   var layout = ${JSON.stringify(initialLayout)};
   var activeMode = ${JSON.stringify(initialMode)};
+  var measuredSizes = {};
   var iframe = document.createElement('iframe');
   iframe.src = ${JSON.stringify(embedUrl)};
   iframe.title = 'Chat widget';
@@ -208,7 +209,7 @@ export async function GET(request: Request) {
     var desktopExpandedWidth = clamp(layout.windowWidth, 320, 560);
     var desktopExpandedHeight = clamp(layout.windowHeight + 78, 520, 938);
     var desktopPeekWidth = clamp(Math.min(layout.windowWidth, 376), 320, 376);
-    var desktopPeekHeight = 344;
+    var desktopPeekHeight = 196;
     var desktopExpandedRadius = clamp(layout.borderRadius, 8, 36);
     var label = (layout.botName || 'Chat with us').trim();
     var isIconOnly = Boolean(layout.launcherIconOnly);
@@ -243,7 +244,7 @@ export async function GET(request: Request) {
       compactWidth: clamp(Math.min(desktopExpandedWidth, window.innerWidth - 36), 296, 340),
       compactHeight: clamp(Math.min(desktopExpandedHeight, window.innerHeight - 260), 340, 430),
       peekWidth: clamp(Math.min(desktopPeekWidth, window.innerWidth - 40), 272, 320),
-      peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 220), 220, 284),
+      peekHeight: clamp(Math.min(desktopPeekHeight, window.innerHeight - 220), 96, 240),
       launcherWidth: isIconOnly ? iconOnlySize : clamp(Math.min(desktopLauncherWidth, window.innerWidth - 36), 176, 236),
       launcherHeight: isIconOnly ? iconOnlySize : layout.launcherStyle === 'minimal' ? 54 : 58,
       launcherRadius:
@@ -255,6 +256,20 @@ export async function GET(request: Request) {
               ? 999
               : 20,
       expandedRadius: Math.min(desktopExpandedRadius, 20)
+    };
+  }
+
+  function getMeasuredSize(mode, sizing) {
+    var measured = measuredSizes[mode];
+    if (!measured) return null;
+    var width = Number(measured.width);
+    var height = Number(measured.height);
+    if (!isFinite(width) || !isFinite(height) || width <= 0 || height <= 0) return null;
+    var maxWidth = Math.max(260, Math.min(window.innerWidth - 24, mode === 'launcher' ? sizing.launcherWidth + 48 : 420));
+    var maxHeight = Math.max(70, Math.min(window.innerHeight - 24, mode === 'launcher' ? sizing.launcherHeight + 24 : 360));
+    return {
+      width: clamp(Math.ceil(width), mode === 'launcher' ? 48 : 120, maxWidth),
+      height: clamp(Math.ceil(height), mode === 'launcher' ? 48 : 58, maxHeight)
     };
   }
 
@@ -281,28 +296,31 @@ export async function GET(request: Request) {
       return;
     }
 
-    // For launcher and peek modes: iframe is pointer-events:none,
-    // hoverZone sits on top to detect hover/click and activate iframe
-    iframe.style.pointerEvents = 'none';
-    hoverZone.style.display = 'block';
-    hoverZone.style.pointerEvents = 'auto';
+    iframe.style.pointerEvents = 'auto';
+    hoverZone.style.display = 'none';
+    hoverZone.style.pointerEvents = 'none';
 
     if (mode === 'launcher') {
-      iframe.style.width = sizing.launcherWidth + 'px';
-      iframe.style.height = sizing.launcherHeight + 'px';
+      var measuredLauncher = getMeasuredSize('launcher', sizing);
+      var launcherWidth = measuredLauncher ? measuredLauncher.width : sizing.launcherWidth;
+      var launcherHeight = measuredLauncher ? measuredLauncher.height : sizing.launcherHeight;
+      iframe.style.width = launcherWidth + 'px';
+      iframe.style.height = launcherHeight + 'px';
       iframe.style.borderRadius = sizing.launcherRadius + 'px';
-      hoverZone.style.width = sizing.launcherWidth + 'px';
-      hoverZone.style.height = sizing.launcherHeight + 'px';
+      hoverZone.style.width = launcherWidth + 'px';
+      hoverZone.style.height = launcherHeight + 'px';
       hoverZone.style.borderRadius = sizing.launcherRadius + 'px';
       return;
     }
 
-    // peek
-    iframe.style.width = sizing.peekWidth + 'px';
-    iframe.style.height = sizing.peekHeight + 'px';
+    var measuredPeek = getMeasuredSize('peek', sizing);
+    var peekWidth = measuredPeek ? measuredPeek.width : sizing.peekWidth;
+    var peekHeight = measuredPeek ? measuredPeek.height : sizing.peekHeight;
+    iframe.style.width = peekWidth + 'px';
+    iframe.style.height = peekHeight + 'px';
     iframe.style.borderRadius = '0';
-    hoverZone.style.width = sizing.peekWidth + 'px';
-    hoverZone.style.height = sizing.peekHeight + 'px';
+    hoverZone.style.width = peekWidth + 'px';
+    hoverZone.style.height = peekHeight + 'px';
     hoverZone.style.borderRadius = '0';
   }
 
@@ -324,8 +342,9 @@ export async function GET(request: Request) {
 
   iframe.addEventListener('mouseleave', function () {
     if (activeMode !== 'open' && activeMode !== 'open-compact') {
-      iframe.style.pointerEvents = 'none';
-      hoverZone.style.pointerEvents = 'auto';
+      iframe.style.pointerEvents = 'auto';
+      hoverZone.style.display = 'none';
+      hoverZone.style.pointerEvents = 'none';
     }
   });
 
@@ -376,6 +395,12 @@ export async function GET(request: Request) {
     var nextMode = event.data.mode;
     if (nextMode !== 'open' && nextMode !== 'open-compact' && nextMode !== 'peek' && nextMode !== 'launcher') {
       nextMode = event.data.open ? 'open' : 'launcher';
+    }
+    if (event.data.size && (nextMode === 'peek' || nextMode === 'launcher')) {
+      measuredSizes[nextMode] = {
+        width: event.data.size.width,
+        height: event.data.size.height
+      };
     }
     applyState(nextMode);
   });

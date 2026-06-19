@@ -24,6 +24,8 @@ export const chatStreamInputSchema = z.object({
   chat_id: z.string().uuid().optional(),
   client_message_id: z.string().trim().min(8).max(120).optional(),
   message: z.string().trim().min(1).max(4000),
+  support_phone: visitorPhoneSchema.optional(),
+  support_cta_label: z.string().trim().min(1).max(80).optional(),
   page_context: z
     .object({
       url: z.string().url().optional(),

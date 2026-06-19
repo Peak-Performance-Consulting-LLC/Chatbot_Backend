@@ -154,9 +154,9 @@ function getClaimedSiteHost(request: Request): string | null {
   return getRequestHost(request);
 }
 
-export async function getTenantById(tenantId: string): Promise<TenantRow> {
+export async function getTenantById(tenantId: string, options?: { fresh?: boolean }): Promise<TenantRow> {
   const cached = tenantCache.get(tenantId);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (!options?.fresh && cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
 
@@ -356,8 +356,12 @@ async function allowPortalPreviewAccess(request: Request, tenantId: string): Pro
   }
 }
 
-export async function assertTenantDomainAccess(request: Request, tenantId: string): Promise<TenantRow> {
-  const tenant = await getTenantById(tenantId);
+export async function assertTenantDomainAccess(
+  request: Request,
+  tenantId: string,
+  options?: { fresh?: boolean }
+): Promise<TenantRow> {
+  const tenant = await getTenantById(tenantId, options);
 
   if (await allowPortalPreviewAccess(request, tenantId)) {
     return tenant;

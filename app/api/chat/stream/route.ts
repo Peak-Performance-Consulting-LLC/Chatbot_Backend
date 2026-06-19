@@ -597,7 +597,7 @@ export async function POST(request: Request) {
     // Fix 1: Parallelize tenant auth + rate limit (saves ~500-800ms)
     const rateLimitKey = `${ip}:${input.device_id}:${input.tenant_id}`;
     const [tenant, rateLimit] = await Promise.all([
-      assertTenantDomainAccess(request, input.tenant_id),
+      assertTenantDomainAccess(request, input.tenant_id, { fresh: true }),
       enforceRateLimit(rateLimitKey)
     ]);
 
@@ -613,8 +613,8 @@ export async function POST(request: Request) {
     }
 
     const callCta = buildCallCtaMetadata({
-      number: tenant.support_phone,
-      label: tenant.support_cta_label
+      number: input.support_phone ?? tenant.support_phone,
+      label: input.support_cta_label ?? tenant.support_cta_label
     });
 
     const tenantSubscriptionUsage = await getTenantSubscriptionUsageSnapshot(input.tenant_id);

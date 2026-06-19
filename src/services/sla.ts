@@ -24,10 +24,10 @@ import {
   broadcastWorkspaceInboxUpdate
 } from "@/services/notification";
 
-const VISITOR_INACTIVITY_WARNING_MS = 60 * 5000;
-const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 60 * 1000;
+const VISITOR_INACTIVITY_WARNING_MS = 5 * 60 * 1000;
+const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 5 * 60 * 1000;
 const VISITOR_INACTIVITY_WARNING_MESSAGE =
-  "Due to inactivity, this conversation will be marked as closed in 1 minute. Please send a message if you still need help.";
+  "Due to inactivity, this conversation will be marked as closed in 5 minutes. Please send a message if you still need help.";
 const VISITOR_INACTIVITY_CLOSED_MESSAGE =
   "This conversation has been closed due to inactivity. You can start a new chat anytime if you need more help.";
 
@@ -100,19 +100,17 @@ function isVisitorInactivityCloseDue(conversation: ChatThread, now: Date): boole
     return false;
   }
 
+  const warnedAt = toDate(conversation.visitor_inactivity_warning_sent_at);
+  const storedCloseDueAt = toDate(conversation.visitor_inactivity_close_due_at);
+  const minimumCloseDueAt = warnedAt
+    ? new Date(warnedAt.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS)
+    : null;
   const closeDueAt =
-    toDate(conversation.visitor_inactivity_close_due_at) ??
-    (() => {
-      const warnedAt = toDate(conversation.visitor_inactivity_warning_sent_at);
-      return warnedAt ? new Date(warnedAt.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS) : null;
-    })();
+    storedCloseDueAt && minimumCloseDueAt
+      ? new Date(Math.max(storedCloseDueAt.getTime(), minimumCloseDueAt.getTime()))
+      : storedCloseDueAt ?? minimumCloseDueAt;
 
-  if (closeDueAt && now >= closeDueAt) {
-    return true;
-  }
-
-  const ageMs = getVisitorInactivityAgeMs(conversation, now);
-  return ageMs !== null && ageMs >= VISITOR_INACTIVITY_WARNING_MS + VISITOR_INACTIVITY_CLOSE_GRACE_MS;
+  return Boolean(closeDueAt && now >= closeDueAt);
 }
 
 async function warnVisitorAboutInactivity(conversation: ChatThread, now: Date) {

@@ -55,7 +55,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const tenant = await assertTenantDomainAccess(request, parsed.data.tenant_id);
+    const tenant = await assertTenantDomainAccess(request, parsed.data.tenant_id, { fresh: true });
     const liveSupport = await getWorkspaceLiveSupportAvailability(tenant.tenant_id).catch((error) => {
       console.error("Failed to load live support availability", error);
       return {
