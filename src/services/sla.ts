@@ -1,5 +1,6 @@
 import {
   getChatById,
+  getLatestVisitorInactivityWarningMessage,
   insertConversationEvent,
   insertChatMessage,
   listPendingHandoffChatsForSla,
@@ -7,7 +8,7 @@ import {
   touchChatThread,
   updateChatFields
 } from "@/chat/repository";
-import type { ChatThread } from "@/chat/types";
+import type { ChatMessage, ChatThread } from "@/chat/types";
 import {
   getQueueById,
   listWorkspaceNotificationRecipients,
@@ -25,9 +26,9 @@ import {
 } from "@/services/notification";
 
 const VISITOR_INACTIVITY_WARNING_MS = 5 * 60 * 1000;
-const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 5 * 60 * 1000;
+const VISITOR_INACTIVITY_CLOSE_GRACE_MS = 60 * 1000;
 const VISITOR_INACTIVITY_WARNING_MESSAGE =
-  "Due to inactivity, this conversation will be marked as closed in 5 minutes. Please send a message if you still need help.";
+  "Due to inactivity, this conversation will be marked as closed in 1 minute. Please send a message if you still need help.";
 const VISITOR_INACTIVITY_CLOSED_MESSAGE =
   "This conversation has been closed due to inactivity. You can start a new chat anytime if you need more help.";
 
@@ -73,8 +74,55 @@ function getVisitorInactivityAnchor(conversation: ChatThread): Date | null {
   );
 }
 
-function hasExternalActivityAfterWarning(conversation: ChatThread): boolean {
-  const warningSentAt = toDate(conversation.visitor_inactivity_warning_sent_at);
+function getWarningSentAt(conversation: ChatThread, warningMessage?: ChatMessage | null): Date | null {
+  const anchor = getVisitorInactivityAnchor(conversation);
+  const candidates = [
+    toDate(conversation.visitor_inactivity_warning_sent_at),
+    toDate(warningMessage?.created_at)
+  ].filter((date): date is Date => Boolean(date));
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const latestWarning = new Date(Math.max(...candidates.map((date) => date.getTime())));
+  if (anchor && latestWarning <= anchor) {
+    return null;
+  }
+
+  return latestWarning;
+}
+
+function getWarningCloseDueAt(
+  conversation: ChatThread,
+  warningSentAt: Date | null,
+  warningMessage?: ChatMessage | null
+): Date | null {
+  const metadata = warningMessage?.metadata;
+  const messageCloseDueAt =
+    metadata && typeof metadata === "object" && typeof metadata.close_due_at === "string"
+      ? toDate(metadata.close_due_at)
+      : null;
+  const policyCloseDueAt = warningSentAt
+    ? new Date(warningSentAt.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS)
+    : null;
+  const candidates = [
+    toDate(conversation.visitor_inactivity_close_due_at),
+    messageCloseDueAt,
+    policyCloseDueAt
+  ].filter((date): date is Date => Boolean(date));
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return new Date(Math.min(...candidates.map((date) => date.getTime())));
+}
+
+function hasExternalActivityAfterWarning(
+  conversation: ChatThread,
+  warningSentAt: Date | null
+): boolean {
   const lastExternalAt = toDate(conversation.last_external_message_at);
   return Boolean(warningSentAt && lastExternalAt && lastExternalAt > warningSentAt);
 }
@@ -87,40 +135,42 @@ function getVisitorInactivityAgeMs(conversation: ChatThread, now: Date): number 
   return Math.max(0, now.getTime() - anchor.getTime());
 }
 
-function isVisitorInactivityWarningDue(conversation: ChatThread, now: Date): boolean {
-  if (conversation.visitor_inactivity_warning_sent_at) {
+function isVisitorInactivityWarningDue(
+  conversation: ChatThread,
+  now: Date,
+  warningMessage?: ChatMessage | null
+): boolean {
+  if (getWarningSentAt(conversation, warningMessage)) {
     return false;
   }
   const ageMs = getVisitorInactivityAgeMs(conversation, now);
   return ageMs !== null && ageMs >= VISITOR_INACTIVITY_WARNING_MS;
 }
 
-function isVisitorInactivityCloseDue(conversation: ChatThread, now: Date): boolean {
-  if (hasExternalActivityAfterWarning(conversation)) {
+function isVisitorInactivityCloseDue(
+  conversation: ChatThread,
+  now: Date,
+  warningMessage?: ChatMessage | null
+): boolean {
+  const warnedAt = getWarningSentAt(conversation, warningMessage);
+  if (!warnedAt || hasExternalActivityAfterWarning(conversation, warnedAt)) {
     return false;
   }
 
-  const warnedAt = toDate(conversation.visitor_inactivity_warning_sent_at);
-  const storedCloseDueAt = toDate(conversation.visitor_inactivity_close_due_at);
-  const minimumCloseDueAt = warnedAt
-    ? new Date(warnedAt.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS)
-    : null;
-  const closeDueAt =
-    storedCloseDueAt && minimumCloseDueAt
-      ? new Date(Math.max(storedCloseDueAt.getTime(), minimumCloseDueAt.getTime()))
-      : storedCloseDueAt ?? minimumCloseDueAt;
-
+  const closeDueAt = getWarningCloseDueAt(conversation, warnedAt, warningMessage);
   return Boolean(closeDueAt && now >= closeDueAt);
 }
 
 async function warnVisitorAboutInactivity(conversation: ChatThread, now: Date) {
   const warnedAt = now.toISOString();
   const closeDueAt = new Date(now.getTime() + VISITOR_INACTIVITY_CLOSE_GRACE_MS).toISOString();
+  const anchor = getVisitorInactivityAnchor(conversation);
   const message = await insertChatMessage({
     chat_id: conversation.id,
     role: "system",
     content: VISITOR_INACTIVITY_WARNING_MESSAGE,
     sender_type: "system",
+    dedupe_key: `visitor-inactivity-warning:${anchor?.getTime() ?? "unknown"}`,
     metadata: {
       visitor_inactivity_warning: true,
       close_due_at: closeDueAt
@@ -207,13 +257,15 @@ async function processVisitorInactivity(input: {
       continue;
     }
 
-    if (isVisitorInactivityCloseDue(latest, input.now)) {
+    const latestWarningMessage = await getLatestVisitorInactivityWarningMessage(latest.id);
+
+    if (isVisitorInactivityCloseDue(latest, input.now, latestWarningMessage)) {
       await closeVisitorInactiveConversation(latest);
       closures += 1;
       continue;
     }
 
-    if (isVisitorInactivityWarningDue(latest, input.now)) {
+    if (isVisitorInactivityWarningDue(latest, input.now, latestWarningMessage)) {
       await warnVisitorAboutInactivity(latest, input.now);
       warnings += 1;
     }

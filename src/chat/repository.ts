@@ -272,6 +272,28 @@ export async function listRecentMessages(
   return ((data ?? []) as ChatMessage[]).reverse();
 }
 
+export async function getLatestVisitorInactivityWarningMessage(chatId: string): Promise<ChatMessage | null> {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("*")
+    .eq("chat_id", chatId)
+    .eq("role", "system")
+    .eq("is_internal", false)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  if (error) {
+    throw new HttpError(500, `Failed to load visitor inactivity warning: ${error.message}`);
+  }
+
+  return (
+    ((data ?? []) as ChatMessage[]).find((message) => {
+      const metadata = message.metadata;
+      return Boolean(metadata && typeof metadata === "object" && metadata.visitor_inactivity_warning === true);
+    }) ?? null
+  );
+}
+
 export async function touchChatThread(
   chatId: string,
   input?: {
