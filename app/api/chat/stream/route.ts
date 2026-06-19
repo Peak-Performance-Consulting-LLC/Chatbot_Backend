@@ -37,6 +37,7 @@ import {
   generateGreetingReply as aiGenerateGreetingReply,
   generatePaymentReply as aiGeneratePaymentReply,
   isBusinessInfoIntent as aiIsBusinessInfoIntent,
+  isCapabilityQuestion as aiIsCapabilityQuestion,
   isSimpleGratitude as aiIsSimpleGratitude,
   isSimpleGreeting as aiIsSimpleGreeting,
   streamAIResponse
@@ -202,7 +203,7 @@ function buildBusinessDescriptionReply(input: {
 
 function buildPaymentSupportMessage(callCta: CallCta) {
   return {
-    text: `For booking and payment support, please connect with a booking specialist by phone: [${callCta.number}](${callCta.tel}).`,
+    text: `For booking and payment support, please call ${callCta.number}.`,
     metadata: {
       call_cta: callCta
     } as MessageMetadata
@@ -213,7 +214,7 @@ function buildNoKnowledgeMessage(callCta: CallCta) {
   return {
     text:
       `I don't have that detail in this website knowledge base yet. ` +
-      `For immediate help, connect with a specialist: [${callCta.number}](${callCta.tel}).`,
+      `For immediate help, call ${callCta.number}.`,
     metadata: {
       no_rag_match: true,
       call_cta: callCta
@@ -257,7 +258,7 @@ function buildTrialMessageLimitReachedMessage(input: {
     text:
       `This concierge has reached the free trial limit of ${input.maxMessages.toLocaleString()} visitor messages for this month. ` +
       `Upgrade the plan to continue using this service. ` +
-      `For urgent help right now, connect with a specialist: [${input.callCta.number}](${input.callCta.tel}).`,
+      `For urgent help right now, call ${input.callCta.number}.`,
     metadata: {
       call_cta: input.callCta
     } as MessageMetadata
@@ -832,7 +833,11 @@ export async function POST(request: Request) {
       requestedService &&
       requestedService === "hotels" &&
       !tenant.supported_services.includes(requestedService);
-    const requestIntent: MessageIntent = aiIsSimpleGreeting(input.message) || aiIsSimpleGratitude(input.message)
+    const isGreetingIntent =
+      aiIsSimpleGreeting(input.message) ||
+      aiIsSimpleGratitude(input.message) ||
+      aiIsCapabilityQuestion(input.message);
+    const requestIntent: MessageIntent = isGreetingIntent
       ? "greeting"
       : detectPaymentIntent(input.message)
       ? "payment_support"

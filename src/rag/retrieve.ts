@@ -73,6 +73,14 @@ function normalizeHost(input: string): string | null {
   }
 }
 
+function stripWww(host: string) {
+  return host.startsWith("www.") ? host.slice(4) : host;
+}
+
+function hostsMatch(left: string, right: string) {
+  return left === right || stripWww(left) === stripWww(right);
+}
+
 function getChunkSourceHost(chunk: MatchRow): string | null {
   const metadataHost =
     chunk.metadata && typeof chunk.metadata === "object"
@@ -181,7 +189,7 @@ export async function retrieveKnowledge(input: {
       : chunks.filter((chunk) => {
           const host = getChunkSourceHost(chunk);
           // Keep hostless chunks (manual FAQ/doc_text) shared for this tenant.
-          return host === null || host === requestedHost;
+          return host === null || hostsMatch(host, requestedHost);
         });
   const maxChunks = input.maxChunks ?? 4;
   const maxContextChars = input.maxContextChars ?? 2800;

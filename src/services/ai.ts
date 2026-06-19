@@ -85,7 +85,7 @@ function buildNoKnowledgeReply(callCta: CallCta) {
   return {
     text:
       `I don't have that detail in this website knowledge base yet. ` +
-      `For immediate help, connect with a specialist: [${callCta.number}](${callCta.tel}).`,
+      `For immediate help, call ${callCta.number}.`,
     metadata: {
       no_rag_match: true,
       call_cta: callCta
@@ -93,8 +93,17 @@ function buildNoKnowledgeReply(callCta: CallCta) {
   };
 }
 
+function normalizeIntentText(message: string) {
+  return message
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function isSimpleGreeting(message: string) {
-  const normalized = message.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  const normalized = normalizeIntentText(message);
   return [
     "hi",
     "hello",
@@ -106,15 +115,41 @@ export function isSimpleGreeting(message: string) {
 }
 
 export function isSimpleGratitude(message: string) {
-  const normalized = message.trim().toLowerCase().replace(/[!?.,]+$/g, "");
+  const normalized = normalizeIntentText(message);
   return ["thanks", "thank you", "thx"].includes(normalized);
 }
 
 export function isBusinessInfoIntent(message: string) {
-  const normalized = message.trim().toLowerCase();
+  const normalized = normalizeIntentText(message);
   return /(about(\s+the)?\s+(company|business|website)|about us|who are you|what do you do|company info|business info)/.test(
     normalized
   );
+}
+
+export function isCapabilityQuestion(message: string) {
+  const normalized = normalizeIntentText(message);
+  return (
+    /^how\s+can\s+you\s+help\b/.test(normalized) ||
+    /^what\s+can\s+you\s+(do|help\s+with|help)\b/.test(normalized) ||
+    /\bwhat\s+can\s+(you|this\s+(bot|chat|assistant))\s+(do|help\s+with)\b/.test(normalized) ||
+    /\bhow\s+(can|do)\s+(you|this\s+(bot|chat|assistant))\s+help\b/.test(normalized) ||
+    /\bhow\s+does\s+(this\s+)?(chat|assistant|bot)\s+work\b/.test(normalized) ||
+    normalized === "help"
+  );
+}
+
+function describeCapabilities(services: TravelService[]) {
+  const labels: string[] = [];
+  if (services.includes("flights")) labels.push("flight deal searches");
+  if (services.includes("hotels")) labels.push("hotel stay searches");
+  if (services.includes("cars")) labels.push("rental car requests");
+  if (services.includes("cruises")) labels.push("cruise requests");
+
+  if (labels.length === 0) {
+    return "questions from this website";
+  }
+
+  return `${labels.join(", ")}, and questions from this website`;
 }
 
 export function generateGreetingReply(input: {
@@ -123,15 +158,21 @@ export function generateGreetingReply(input: {
   message: string;
 }): { text: string; metadata: MessageMetadata } {
   const isGratitude = isSimpleGratitude(input.message);
+  const isCapability = isCapabilityQuestion(input.message);
+  const quickReplies = input.enabledServices.length > 0
+    ? buildServicesQuickReplies(input.enabledServices)
+    : ["I have a question", input.callCta.label];
   const text = isGratitude
     ? "You're welcome. I can help whenever you're ready."
+    : isCapability
+    ? `I can help with ${describeCapabilities(input.enabledServices)}, and I can connect you with a specialist when you need human help. What would you like to do?`
     : "Hello. How can I help today?";
 
   return {
     text,
     metadata: {
       call_cta: input.callCta,
-      quick_replies: ["I have a question", input.callCta.label]
+      quick_replies: isCapability ? quickReplies : ["I have a question", input.callCta.label]
     }
   };
 }
@@ -158,7 +199,7 @@ export function generatePaymentReply(callCta: CallCta): {
   metadata: MessageMetadata;
 } {
   return {
-    text: `For booking and payment support, please connect with a booking specialist by phone: [${callCta.number}](${callCta.tel}).`,
+    text: `For booking and payment support, please call ${callCta.number}.`,
     metadata: {
       call_cta: callCta
     }
@@ -356,7 +397,7 @@ export async function streamAIResponse(input: {
 
       assistantText =
         `I'm unable to access support responses right now. ` +
-        `Please try again shortly, or connect at [${input.callCta.number}](${input.callCta.tel}).`;
+        `Please try again shortly, or call ${input.callCta.number}.`;
       input.writeToken(assistantText);
     }
   }
